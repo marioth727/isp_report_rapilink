@@ -1,0 +1,635 @@
+{
+	"info": {
+		"_postman_id": "7c94f4fe-ac8a-4702-8eee-76c8e80a508a",
+		"name": "WispHub API",
+		"schema": "https://schema.getpostman.com/json/collection/v2.0.0/collection.json",
+		"_exporter_id": "18978788"
+	},
+	"item": [
+		{
+			"name": "Clientes",
+			"item": [
+				{
+					"name": "Lista de clientes",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Api-Key {{wh_token}}",
+								"type": "text"
+							}
+						],
+						"url": "{{wh_host}}/api/clientes/"
+					},
+					"response": []
+				},
+				{
+					"name": "Lista de clientes | Paginación",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Api-Key {{wh_token}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "http://api.wisphub.net/api/clientes/?limit=10&offset=0",
+							"protocol": "http",
+							"host": [
+								"api",
+								"wisphub",
+								"net"
+							],
+							"path": [
+								"api",
+								"clientes",
+								""
+							],
+							"query": [
+								{
+									"key": "limit",
+									"value": "10",
+									"description": "Num de elementos por página. Máximo 300."
+								},
+								{
+									"key": "offset",
+									"value": "0",
+									"description": "Indica desde qué posición comenzar a contar"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Lista de clientes | Paginación (página 2)",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Api-Key {{wh_token}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "http://api.wisphub.net/api/clientes/?limit=10&offset=10",
+							"protocol": "http",
+							"host": [
+								"api",
+								"wisphub",
+								"net"
+							],
+							"path": [
+								"api",
+								"clientes",
+								""
+							],
+							"query": [
+								{
+									"key": "limit",
+									"value": "10",
+									"description": "Num de elementos por página. Máximo 300."
+								},
+								{
+									"key": "offset",
+									"value": "10",
+									"description": "Indica desde qué posición comenzar a contar"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Lista de clientes | Filtros: usuario",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Api-Key {{wh_token}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{wh_host}}/api/clientes/?usuario=wisphubapi0054@techjuino",
+							"host": [
+								"{{wh_host}}"
+							],
+							"path": [
+								"api",
+								"clientes",
+								""
+							],
+							"query": [
+								{
+									"key": "usuario",
+									"value": "wisphubapi0054@techjuino"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Lista de clientes | Filtros: usuario__contains",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Api-Key {{wh_token}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{wh_host}}/api/clientes/?usuario__contains=wisphubapi005",
+							"host": [
+								"{{wh_host}}"
+							],
+							"path": [
+								"api",
+								"clientes",
+								""
+							],
+							"query": [
+								{
+									"key": "usuario__contains",
+									"value": "wisphubapi005"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Lista de clientes | Filtros: usuario__contains + cedula",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Api-Key {{wh_token}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{wh_host}}/api/clientes/?usuario__contains=wisphubapi005&cedula=2679075490",
+							"host": [
+								"{{wh_host}}"
+							],
+							"path": [
+								"api",
+								"clientes",
+								""
+							],
+							"query": [
+								{
+									"key": "usuario__contains",
+									"value": "wisphubapi005"
+								},
+								{
+									"key": "cedula",
+									"value": "2679075490"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Consulta información del cliente",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Api-Key {{wh_token}}",
+								"type": "text"
+							}
+						],
+						"url": "{{wh_host}}/api/clientes/<id_servicio>/"
+					},
+					"response": []
+				},
+				{
+					"name": "Consulta saldo del cliente",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Api-Key {{wh_token}}",
+								"type": "text"
+							}
+						],
+						"url": "{{wh_host}}/api/clientes/<id_servicio>/saldo/"
+					},
+					"response": []
+				},
+				{
+					"name": "Ping a cliente",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Api-Key {{wh_token}}",
+								"type": "text"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"pings\": 3,\n  \"interfaz\": \"ether1\",\n  \"arp_ping\": true\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": "{{wh_host}}/api/clientes/<id_servicio>/ping/"
+					},
+					"response": []
+				},
+				{
+					"name": "Agregar cliente",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Api-Key {{wh_token}}",
+								"type": "text"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"usuario_rb\": \"testapiwisphub\",\n  \"ip\": \"192.168.80.119\",\n  \"plan_internet\": 9999\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": "{{wh_host}}/api/clientes/agregar-cliente/<id_zona>/"
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Tareas y acciones",
+			"item": [
+				{
+					"name": "Obtener resultado de tarea",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Api-Key {{wh_token}}",
+								"type": "text"
+							}
+						],
+						"url": "{{wh_host}}/api/tasks/<id_task>/"
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Sistema",
+			"item": [
+				{
+					"name": "Lista de zonas",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Api-Key {{wh_token}}",
+								"type": "text"
+							}
+						],
+						"url": "{{wh_host}}/api/zonas/"
+					},
+					"response": []
+				},
+				{
+					"name": "Lista de planes de internet",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Api-Key {{wh_token}}",
+								"type": "text"
+							}
+						],
+						"url": "{{wh_host}}/api/plan-internet/"
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Facturas",
+			"item": [
+				{
+					"name": "Lista de facturas",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Api-Key {{wh_token}}",
+								"type": "text"
+							}
+						],
+						"url": "{{wh_host}}/api/facturas/"
+					},
+					"response": []
+				},
+				{
+					"name": "Lista de facturas | Filtros: fecha de emisión (exacta)",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Api-Key {{wh_token}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{wh_host}}/api/facturas/?fecha_emision=2024-12-28",
+							"host": [
+								"{{wh_host}}"
+							],
+							"path": [
+								"api",
+								"facturas",
+								""
+							],
+							"query": [
+								{
+									"key": "fecha_emision",
+									"value": "2024-12-28",
+									"description": "En formato YYYY-MM-DD"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Lista de facturas | Filtros: fecha de emisión (rango)",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Api-Key {{wh_token}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{wh_host}}/api/facturas/?fecha_emision__range_0=2025-01-01&fecha_emision__range_1=2025-01-31",
+							"host": [
+								"{{wh_host}}"
+							],
+							"path": [
+								"api",
+								"facturas",
+								""
+							],
+							"query": [
+								{
+									"key": "fecha_emision__range_0",
+									"value": "2025-01-01"
+								},
+								{
+									"key": "fecha_emision__range_1",
+									"value": "2025-01-31"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Lista de facturas | Filtros: tipo de factura",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Api-Key {{wh_token}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{wh_host}}/api/facturas/?tipo=2",
+							"host": [
+								"{{wh_host}}"
+							],
+							"path": [
+								"api",
+								"facturas",
+								""
+							],
+							"query": [
+								{
+									"key": "tipo",
+									"value": "2",
+									"description": "1: Internet \n2: Otros Ingresos"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Lista de facturas | Filtros: tipo de factura + estado",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Api-Key {{wh_token}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{wh_host}}/api/facturas/?tipo=2&estado=1",
+							"host": [
+								"{{wh_host}}"
+							],
+							"path": [
+								"api",
+								"facturas",
+								""
+							],
+							"query": [
+								{
+									"key": "tipo",
+									"value": "2",
+									"description": "1: Internet \n2: Otros Ingresos"
+								},
+								{
+									"key": "estado",
+									"value": "1",
+									"description": "1: Pendiente de Pago \n2: Pagada \n3: Cancelada\n4: En Revision \n5: Se Transfirio"
+								}
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Soporte técnico",
+			"item": [
+				{
+					"name": "Lista de tickets de soporte",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Api-Key {{wh_token}}",
+								"type": "text"
+							}
+						],
+						"url": "{{wh_host}}/api/tickets/"
+					},
+					"response": []
+				},
+				{
+					"name": "Lista de tickets de soporte | Filtros: fecha de creacion",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Api-Key {{wh_token}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{wh_host}}/api/tickets/?fecha_creacion_0=2025-01-01&fecha_creacion_1=2025-01-31",
+							"host": [
+								"{{wh_host}}"
+							],
+							"path": [
+								"api",
+								"tickets",
+								""
+							],
+							"query": [
+								{
+									"key": "fecha_creacion_0",
+									"value": "2025-01-01"
+								},
+								{
+									"key": "fecha_creacion_1",
+									"value": "2025-01-31"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Lista de tickets de soporte | Filtros: fecha de creacion + estado",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Api-Key {{wh_token}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{wh_host}}/api/tickets/?fecha_creacion_0=2025-01-01&fecha_creacion_1=2025-01-31&estado=2",
+							"host": [
+								"{{wh_host}}"
+							],
+							"path": [
+								"api",
+								"tickets",
+								""
+							],
+							"query": [
+								{
+									"key": "fecha_creacion_0",
+									"value": "2025-01-01"
+								},
+								{
+									"key": "fecha_creacion_1",
+									"value": "2025-01-31"
+								},
+								{
+									"key": "estado",
+									"value": "2",
+									"description": "1: Nuevo\n2: En progreso\n3: Resuelto\n4: Cerrado\n"
+								}
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		}
+	],
+	"event": [
+		{
+			"listen": "prerequest",
+			"script": {
+				"type": "text/javascript",
+				"packages": {},
+				"exec": [
+					""
+				]
+			}
+		},
+		{
+			"listen": "test",
+			"script": {
+				"type": "text/javascript",
+				"packages": {},
+				"exec": [
+					""
+				]
+			}
+		}
+	],
+	"variable": [
+		{
+			"key": "wh_host",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "wh_token",
+			"value": "",
+			"type": "string"
+		}
+	]
+}
