@@ -21,12 +21,16 @@ export default async function handler(req, res) {
 
     // Diagnostic endpoint
     if (apiPath === 'health') {
+        const key = process.env.VITE_WISPHUB_API_KEY || '';
         return res.status(200).json({
             status: 'ok',
             config: {
-                hasKey: !!process.env.VITE_WISPHUB_API_KEY,
-                keyPrefix: process.env.VITE_WISPHUB_API_KEY ? process.env.VITE_WISPHUB_API_KEY.substring(0, 4) : 'none',
-                nodeVersion: process.version
+                hasKey: !!key,
+                keyLength: key.length,
+                keyPrefix: key.substring(0, 4),
+                keySuffix: key.substring(key.length - 4),
+                nodeVersion: process.version,
+                envType: process.env.NODE_ENV
             }
         });
     }
