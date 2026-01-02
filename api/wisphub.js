@@ -40,7 +40,7 @@ export default async function handler(req, res) {
         });
     }
 
-    const targetUrl = `https://api.wisphub.net/api/${apiPath}${searchParams}`;
+    const targetUrl = `https://api.wisphub.io/api/${apiPath}${searchParams}`;
     console.log(`[Proxy] Forwarding ${req.method} to: ${targetUrl}`);
 
     try {
@@ -48,6 +48,7 @@ export default async function handler(req, res) {
             method: req.method,
             headers: {
                 'Authorization': `Api-Key ${API_KEY}`,
+                'Api-Key': API_KEY, // Doubling up for compatibility
                 'Accept': 'application/json',
             }
         };
