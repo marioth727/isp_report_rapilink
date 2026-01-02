@@ -1,18 +1,16 @@
-
+import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useForm, useFieldArray } from 'react-hook-form';
+import { supabase } from '../../lib/supabase';
 import type { DailyReport } from '../../types';
 import { REPORT_CATEGORIES, PREDEFINED_OBJECTIONS } from '../../types';
 import { Plus, Trash2, Save, Calendar as CalendarIcon, AlertCircle } from 'lucide-react';
-import { supabase } from '../../lib/supabase';
-import { useNavigate } from 'react-router-dom';
-import { useState } from 'react';
-import clsx from 'clsx';
 
 export function DailyReportForm() {
     const navigate = useNavigate();
     const [saving, setSaving] = useState(false);
 
-    const { register, control, handleSubmit, watch, formState: { errors } } = useForm<DailyReport>({
+    const { register, control, handleSubmit, watch } = useForm<DailyReport>({
         defaultValues: {
             date: new Date().toISOString().split('T')[0],
             metrics: {
@@ -301,8 +299,8 @@ function TableInput({ register, highlight }: { register: any, highlight?: 'green
             {...register}
             onFocus={(e) => e.target.select()}
             className={`w-full bg-transparent border border-transparent hover:border-border focus:border-input rounded p-1 text-center font-mono focus:outline-none focus:ring-1 focus:ring-ring transition-all ${highlight === 'green' ? 'bg-green-500/5 text-green-600 font-bold' :
-                    highlight === 'red' ? 'bg-red-500/5 text-red-600' :
-                        highlight === 'yellow' ? 'bg-yellow-500/5 text-yellow-600' : ''
+                highlight === 'red' ? 'bg-red-500/5 text-red-600' :
+                    highlight === 'yellow' ? 'bg-yellow-500/5 text-yellow-600' : ''
                 }`}
         />
     )

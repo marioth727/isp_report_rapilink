@@ -1,6 +1,6 @@
-import { Menu, X } from 'lucide-react';
-import { useState } from 'react';
+import { X } from 'lucide-react';
 import { createPortal } from 'react-dom';
+import React from 'react';
 
 interface MobileSidebarProps {
     isOpen: boolean;

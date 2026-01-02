@@ -1,5 +1,5 @@
 
-import { AlertCircle, CheckCircle, Smartphone, TrendingUp, UserMinus, RotateCcw, Activity, DollarSign } from 'lucide-react';
+import { Smartphone, TrendingUp, UserMinus, RotateCcw, Activity, DollarSign } from 'lucide-react';
 import clsx from 'clsx';
 
 

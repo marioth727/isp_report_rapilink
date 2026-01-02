@@ -122,11 +122,13 @@ export function Configuration() {
             const { data: { user } } = await supabase.auth.getUser();
             if (!user) return;
 
-            const { data, error } = await supabase
+            const { data, error: fetchError } = await supabase
                 .from('crm_config')
                 .select('*')
                 .eq('user_id', user.id)
                 .single();
+
+            if (fetchError && fetchError.code !== 'PGRST116') throw fetchError;
 
             if (data) {
                 setConfig({
@@ -136,8 +138,8 @@ export function Configuration() {
                 });
                 if (data.plan_prices) setPlans(data.plan_prices);
             }
-        } catch (error) {
-            console.error('Error loading config:', error);
+        } catch (err) {
+            console.error('Error loading config:', err);
         } finally {
             setLoading(false);
         }

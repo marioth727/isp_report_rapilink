@@ -1,5 +1,5 @@
-
-import { Trophy, Star, Target } from 'lucide-react';
+```
+import { Trophy, Target } from 'lucide-react';
 import clsx from 'clsx';
 import confetti from 'canvas-confetti';
 import { useEffect, useState } from 'react';
@@ -64,7 +64,7 @@ export function GoalProgress({ currentSales, targetSales = 5 }: GoalProgressProp
                             "h-full transition-all duration-1000 ease-out relative",
                             progress === 100 ? "bg-gradient-to-r from-yellow-400 to-orange-500" : "bg-gradient-to-r from-indigo-500 to-blue-500"
                         )}
-                        style={{ width: `${progress}%` }}
+                        style={{ width: `${ progress }% ` }}
                     >
                         {/* Shimmer effect */}
                         <div className="absolute inset-0 bg-white/20 w-full animate-[shimmer_2s_infinite] -skew-x-12 translate-x-[-100%]" />

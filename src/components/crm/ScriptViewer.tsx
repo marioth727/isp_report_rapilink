@@ -1,7 +1,6 @@
 
-import { BookOpen, MessageCircle, ShieldAlert, CheckCircle2 } from 'lucide-react';
+import { BookOpen, MessageCircle, ShieldAlert } from 'lucide-react';
 import { SALES_SCRIPTS, OBJECTION_HANDLING } from '../../data/salesScripts';
-import clsx from 'clsx';
 
 interface ScriptViewerProps {
     category: string;
