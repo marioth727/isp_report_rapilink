@@ -1,26 +1,19 @@
-
 import { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
 import { InteractionForm } from '../components/crm/InteractionForm';
 import type { CRMInteraction } from '../types';
 import { format } from 'date-fns';
-import { es } from 'date-fns/locale';
-import { History, LayoutList, ArrowRight, Download } from 'lucide-react';
-import * as XLSX from 'xlsx';
-import clsx from 'clsx';
-import { Link } from 'react-router-dom';
-
-import { Trash2, Pencil } from 'lucide-react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { ArrowRight, LayoutList } from 'lucide-react';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import type { WispHubClient } from '../lib/wisphub';
 
 export function InteractionLog() {
     const [interactions, setInteractions] = useState<CRMInteraction[]>([]);
     const [editingInteraction, setEditingInteraction] = useState<CRMInteraction | null>(null);
-    const [selectedDateFilter, setSelectedDateFilter] = useState<string>(new Date().toISOString().split('T')[0]);
+    const [selectedDateFilter] = useState<string>(new Date().toISOString().split('T')[0]);
 
     const location = useLocation();
-    const navigate = useNavigate(); // Add hook
+    const navigate = useNavigate();
     const preSelectedClient = location.state?.selectedClient as WispHubClient | undefined;
     const previousInteraction = location.state?.previousInteraction as CRMInteraction | undefined;
     const returnPage = location.state?.returnPage as number | undefined; // Capture page
@@ -69,31 +62,6 @@ export function InteractionLog() {
         }
     };
 
-    const handleDelete = async (id: string) => {
-        if (!confirm('¿Estás seguro de eliminar este registro?')) return;
-
-        const { error } = await supabase
-            .from('crm_interactions')
-            .delete()
-            .eq('id', id);
-
-        if (error) {
-            alert('Error eliminando: ' + error.message);
-        } else {
-            fetchInteractions();
-            // If we deleted the item being edited, clear the form
-            if (editingInteraction?.id === id) {
-                setEditingInteraction(null);
-            }
-        }
-    };
-
-    const handleEdit = (interaction: CRMInteraction) => {
-        setEditingInteraction(interaction);
-        // Scroll to top to see form
-        window.scrollTo({ top: 0, behavior: 'smooth' });
-    };
-
     const handleSuccess = () => {
         if (preSelectedClient) {
             // Return to Campaign Manager preserving state
@@ -102,35 +70,6 @@ export function InteractionLog() {
             fetchInteractions();
             setEditingInteraction(null);
         }
-    };
-
-    const handleExport = () => {
-        if (interactions.length === 0) {
-            alert('No hay datos para exportar en esta fecha.');
-            return;
-        }
-
-        // Prepare data for Excel
-        const dataToExport = interactions.map(i => ({
-            Fecha: i.created_at ? format(new Date(i.created_at), 'dd/MM/yyyy') : '',
-            Hora: i.created_at ? format(new Date(i.created_at), 'HH:mm:ss') : '',
-            Cliente: i.client_reference,
-            'Plan Actual': i.current_plan,
-            Resultado: i.result,
-            'Plan Sugerido': i.suggested_plan || '',
-            Categoria: i.migration_category || '',
-            Objecion: i.objection || '',
-            'Es Caso Especial': i.is_special_case ? 'SI' : 'NO',
-            'Descripcion Caso': i.special_case_description || '',
-            'Numero Caso': i.special_case_number || ''
-        }));
-
-        const wb = XLSX.utils.book_new();
-        const ws = XLSX.utils.json_to_sheet(dataToExport);
-        XLSX.utils.book_append_sheet(wb, ws, "Gestiones");
-
-        const fileName = `reporte_gestiones_${selectedDateFilter}.xlsx`;
-        XLSX.writeFile(wb, fileName);
     };
 
     return (

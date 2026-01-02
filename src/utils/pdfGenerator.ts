@@ -66,9 +66,9 @@ export const generateDailyReportPDF = (data: PDFReportData) => {
 
     const tableRows = interactions.map(i => [
         i.created_at ? format(new Date(i.created_at), 'HH:mm') : '-',
-        i.client_reference,
-        i.current_plan,
-        i.result,
+        i.client_reference || '-',
+        i.current_plan || '-',
+        i.result || '-',
         i.objection || i.suggested_plan || '-'
     ]);
 

@@ -1,7 +1,7 @@
 
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Plus, Search, Calendar } from 'lucide-react';
+import { Plus, Calendar } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import type { DailyReport } from '../types';
 import clsx from 'clsx';
