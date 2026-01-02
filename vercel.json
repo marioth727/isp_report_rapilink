@@ -1,8 +1,8 @@
 {
     "rewrites": [
         {
-            "source": "/api/wisphub/:path*",
-            "destination": "https://api.wisphub.net/api/:path*"
+            "source": "/api/wisphub/(.*)",
+            "destination": "https://api.wisphub.net/api/$1"
         },
         {
             "source": "/((?!api/).*)",
