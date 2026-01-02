@@ -1,53 +1,76 @@
 
 export default async function handler(req, res) {
-    // 1. Get the path from the query (Vercel provides it in req.url or we can extract it)
-    const url = new URL(req.url, `https://${req.headers.host}`);
-    const fullPath = url.pathname; // e.g., /api/wisphub/clientes/
+    // 1. Handle CORS Preflight
+    res.setHeader('Access-Control-Allow-Credentials', true);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
+    res.setHeader(
+        'Access-Control-Allow-Headers',
+        'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization'
+    );
 
-    // 2. Extract the part after /api/wisphub/
+    if (req.method === 'OPTIONS') {
+        res.status(200).end();
+        return;
+    }
+
+    const url = new URL(req.url, `https://${req.headers.host}`);
+    const fullPath = url.pathname;
     const apiPath = fullPath.replace(/^\/api\/wisphub\//, '');
     const searchParams = url.search;
 
-    // 3. Construct the target URL
-    const targetUrl = `https://api.wisphub.net/api/${apiPath}${searchParams}`;
+    // Diagnostic endpoint
+    if (apiPath === 'health') {
+        return res.status(200).json({
+            status: 'ok',
+            config: {
+                hasKey: !!process.env.VITE_WISPHUB_API_KEY,
+                keyPrefix: process.env.VITE_WISPHUB_API_KEY ? process.env.VITE_WISPHUB_API_KEY.substring(0, 4) : 'none',
+                nodeVersion: process.version
+            }
+        });
+    }
 
     const API_KEY = process.env.VITE_WISPHUB_API_KEY;
 
     if (!API_KEY) {
-        return res.status(500).json({ error: 'VITE_WISPHUB_API_KEY is not configured in Vercel environment variables.' });
+        return res.status(500).json({
+            error: 'VITE_WISPHUB_API_KEY is missing in Vercel environment.',
+            tip: 'Go to Vercel Dashboard -> Settings -> Environment Variables and ensure VITE_WISPHUB_API_KEY is set.'
+        });
     }
 
-    console.log(`[Proxy] Forwarding to: ${targetUrl}`);
+    const targetUrl = `https://api.wisphub.net/api/${apiPath}${searchParams}`;
+    console.log(`[Proxy] Forwarding ${req.method} to: ${targetUrl}`);
 
     try {
-        const options = {
+        const fetchOptions = {
             method: req.method,
             headers: {
                 'Authorization': `Api-Key ${API_KEY}`,
-                'Content-Type': 'application/json',
+                'Accept': 'application/json',
             }
         };
 
         // If it's a POST/PUT request, forward the body
-        if (['POST', 'PUT', 'PATCH'].includes(req.method)) {
-            // Check if it's FormData or JSON
-            if (req.headers['content-type']?.includes('multipart/form-data')) {
-                // For FormData, we might need a more complex handling if using a library, 
-                // but for simple cases we can try to pass the buffer if provided.
-                // However, the CRM mostly uses JSON for everything except tickets which uses FormData.
-                // Let's handle regular json body for now.
-                options.body = req.body;
-            } else {
-                options.body = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
-            }
+        if (['POST', 'PUT', 'PATCH'].includes(req.method) && req.body) {
+            fetchOptions.headers['Content-Type'] = req.headers['content-type'] || 'application/json';
+            fetchOptions.body = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
         }
 
-        const response = await fetch(targetUrl, options);
-        const data = await response.json().catch(() => null);
+        const response = await fetch(targetUrl, fetchOptions);
 
-        res.status(response.status).json(data || { status: response.statusText });
+        // Handle non-JSON responses gracefully
+        const contentType = response.headers.get('content-type');
+        if (contentType && contentType.includes('application/json')) {
+            const data = await response.json();
+            return res.status(response.status).json(data);
+        } else {
+            const text = await response.text();
+            return res.status(response.status).send(text);
+        }
     } catch (error) {
         console.error('[Proxy Error]', error);
-        res.status(500).json({ error: 'Error connecting to WispHub API', details: error.message });
+        return res.status(500).json({ error: 'Proxy Exception', message: error.message });
     }
 }
