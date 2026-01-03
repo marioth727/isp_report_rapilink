@@ -30,8 +30,7 @@ export interface WispHubStaff {
     nivel: string; // "Técnico", "Administrador", etc.
 }
 
-const API_KEY = import.meta.env.VITE_WISPHUB_API_KEY;
-// Use proxy if in dev, direct URL in prod (or backend function)
+
 const BASE_URL = '/api/wisphub';
 
 export const TICKET_SUBJECTS = [
@@ -142,15 +141,9 @@ let CACHE_PROMISE: Promise<void> | null = null;
 
 export const WisphubService = {
     async getStaff(): Promise<WispHubStaff[]> {
-        if (!API_KEY) {
-            console.warn('[WispHub] No API Key configured, using fallback technicians');
-            return FALLBACK_TECHNICIANS;
-        }
-
         try {
             const response = await fetch(`${BASE_URL}/staff/`, {
                 headers: {
-                    'Authorization': `Api-Key ${API_KEY}`,
                     'Content-Type': 'application/json'
                 }
             });
@@ -178,8 +171,6 @@ export const WisphubService = {
     },
 
     async getAllClients(page: number = 1, limit: number = 20, filters?: { plan?: string; status?: string }): Promise<{ results: WispHubClient[], count: number }> {
-        if (!API_KEY) throw new Error("WispHub API Key not configured");
-
         try {
             // Native Filter using ID if plan selected
             // Reverted from "Fetch All" strategy as internal tests proved plan_internet=ID works.
@@ -201,7 +192,6 @@ export const WisphubService = {
 
             const response = await fetch(url, {
                 headers: {
-                    'Authorization': `Api-Key ${API_KEY}`,
                     'Content-Type': 'application/json'
                 }
             });
@@ -212,6 +202,8 @@ export const WisphubService = {
             }
 
             const data = await response.json();
+
+            console.log(`[WispHub] Received ${data.results?.length || 0} clients, total count: ${data.count || 0}`);
 
             // No need for strict JS filtering anymore as API handles ID filtering correctly
             return { results: data.results || [], count: data.count || 0 };
@@ -230,8 +222,6 @@ export const WisphubService = {
         // If a request is already running, return THAT promise so we wait for it.
         if (CACHE_PROMISE !== null) return CACHE_PROMISE;
 
-        if (!API_KEY) return;
-
         console.log("[WispHub] Starting Background Sync of ALL Clients...");
 
         // Create the promise and assign it to the singleton
@@ -245,7 +235,7 @@ export const WisphubService = {
                 // 100 pages * 500 = 50,000 clients cap. User has ~6500, so ~13 pages. Safe.
                 while (nextUrl && pages < 100) {
                     try {
-                        const res = await fetch(nextUrl, { headers: { 'Authorization': `Api-Key ${API_KEY}` } });
+                        const res = await fetch(nextUrl);
                         if (!res.ok) break;
                         const data = await res.json();
                         allClients = [...allClients, ...(data.results || [])];
@@ -283,7 +273,6 @@ export const WisphubService = {
     },
 
     async searchClients(query: string): Promise<WispHubClient[]> {
-        if (!API_KEY) throw new Error("WispHub API Key not configured");
 
         // Kick off cache sync if not exists (non-blocking if we use API first, but we want robust search)
         if (!GLOBAL_CLIENT_CACHE) {
@@ -308,7 +297,7 @@ export const WisphubService = {
             // 2. If Numeric or No Cache Yet, use API
             if (isNumeric) {
                 const url = `${BASE_URL}/clientes/?limit=50&cedula=${encodeURIComponent(query)}`;
-                const response = await fetch(url, { headers: { 'Authorization': `Api-Key ${API_KEY}` } });
+                const response = await fetch(url);
                 if (response.ok) {
                     const data = await response.json();
                     results = data.results || [];
@@ -320,7 +309,7 @@ export const WisphubService = {
 
                 const fetchPromises = searchTerms.map(term => {
                     const url = `${BASE_URL}/clientes/?limit=300&nombre=${encodeURIComponent(term)}`;
-                    return fetch(url, { headers: { 'Authorization': `Api-Key ${API_KEY}` } })
+                    return fetch(url)
                         .then(res => res.ok ? res.json() : { results: [] })
                         .then(data => data.results || [])
                         .catch(() => []);
@@ -376,11 +365,8 @@ export const WisphubService = {
     },
 
     async getClientBalance(serviceId: number): Promise<number> {
-        if (!API_KEY) return 0;
         try {
-            const response = await fetch(`${BASE_URL}/clientes/${serviceId}/saldo/`, {
-                headers: { 'Authorization': `Api-Key ${API_KEY}` }
-            });
+            const response = await fetch(`${BASE_URL}/clientes/${serviceId}/saldo/`);
             if (!response.ok) return 0;
             const data = await response.json();
             return data.saldo_total || 0;
@@ -390,7 +376,6 @@ export const WisphubService = {
     },
 
     async getInternetPlans(includeDetails: boolean = false): Promise<WispHubPlan[]> {
-        if (!API_KEY) return [];
 
         try {
             let allPlans: WispHubPlan[] = [];
@@ -398,9 +383,7 @@ export const WisphubService = {
 
             // 1. Fetch ALL Plans (Pagination Loop)
             while (nextUrl) {
-                const response = await fetch(nextUrl, {
-                    headers: { 'Authorization': `Api-Key ${API_KEY}` }
-                });
+                const response = await fetch(nextUrl);
 
                 if (!response.ok) break;
 
@@ -427,9 +410,7 @@ export const WisphubService = {
 
             const detailedPlans = await Promise.all(allPlans.map(async (plan: any) => {
                 try {
-                    const detailRes = await fetch(`${BASE_URL}/plan-internet/queue/${plan.id}/`, {
-                        headers: { 'Authorization': `Api-Key ${API_KEY}` }
-                    });
+                    const detailRes = await fetch(`${BASE_URL}/plan-internet/queue/${plan.id}/`);
                     if (detailRes.ok) {
                         const detail = await detailRes.json();
                         return {
@@ -453,11 +434,8 @@ export const WisphubService = {
     },
 
     async getPlanDetails(planId: number | string): Promise<any> {
-        if (!API_KEY) return null;
         try {
-            const detailRes = await fetch(`${BASE_URL}/plan-internet/queue/${planId}/`, {
-                headers: { 'Authorization': `Api-Key ${API_KEY}` }
-            });
+            const detailRes = await fetch(`${BASE_URL}/plan-internet/queue/${planId}/`);
             if (detailRes.ok) {
                 const detail = await detailRes.json();
                 return {
@@ -475,11 +453,10 @@ export const WisphubService = {
     },
 
     async getTickets(serviceId: number): Promise<any[]> {
-        if (!API_KEY) return [];
         try {
             // Filter tickets by service ID
             const url = `${BASE_URL}/tickets/?limit=5&servicio=${serviceId}&ordering=-id`;
-            const response = await fetch(url, { headers: { 'Authorization': `Api-Key ${API_KEY}` } });
+            const response = await fetch(url);
             if (!response.ok) return [];
             const data = await response.json();
             return data.results || [];
@@ -496,7 +473,6 @@ export const WisphubService = {
         prioridad: number;
         technicianId?: string;
     }): Promise<any> {
-        if (!API_KEY) throw new Error("WispHub API Key not configured");
 
         try {
             const formData = new FormData();
@@ -530,7 +506,6 @@ export const WisphubService = {
 
             const response = await fetch(`${BASE_URL}/tickets/`, {
                 method: 'POST',
-                headers: { 'Authorization': `Api-Key ${API_KEY}` },
                 body: formData
             });
 
