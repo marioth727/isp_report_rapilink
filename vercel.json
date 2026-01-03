@@ -1,8 +1,12 @@
 {
     "rewrites": [
         {
-            "source": "/api/wisphub/:path*",
-            "destination": "/api/wisphub.js"
+            "source": "/api/wisphub/(.*)",
+            "destination": "/api/wisphub"
+        },
+        {
+            "source": "/api/wisphub",
+            "destination": "/api/wisphub"
         },
         {
             "source": "/((?!api/).*)",

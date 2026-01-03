@@ -1,5 +1,4 @@
-
-export default async function handler(req, res) {
+﻿export default async function handler(req, res) {
     // 1. Handle CORS Preflight
     res.setHeader('Access-Control-Allow-Credentials', true);
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -14,9 +13,13 @@ export default async function handler(req, res) {
         return;
     }
 
-    const url = new URL(req.url, `https://${req.headers.host}`);
+    const url = new URL(req.url, https://);
     const fullPath = url.pathname;
-    const apiPath = fullPath.replace(/^\/api\/wisphub\//, '');
+    
+    // Improved path extraction: remove /api/wisphub and ensure no leading slash for the target api path
+    let apiPath = fullPath.replace(/^\/api\/wisphub/, '');
+    if (apiPath.startsWith('/')) apiPath = apiPath.substring(1);
+    
     const searchParams = url.search;
 
     // Diagnostic endpoint
@@ -30,7 +33,9 @@ export default async function handler(req, res) {
                 keyPrefix: key.substring(0, 4),
                 keySuffix: key.substring(key.length - 4),
                 nodeVersion: process.version,
-                envType: process.env.NODE_ENV
+                envType: process.env.NODE_ENV,
+                originalPath: fullPath,
+                extractedApiPath: apiPath
             }
         });
     }
@@ -44,20 +49,26 @@ export default async function handler(req, res) {
         });
     }
 
-    const targetUrl = `https://api.wisphub.io/api/${apiPath}${searchParams}`;
-    console.log(`[Proxy] Forwarding ${req.method} to: ${targetUrl}`);
+    // WispHub is very strict with trailing slashes. 
+    // If the path does not end in a slash and it is not a file access, we add it.
+    let finalPath = apiPath;
+    if (finalPath && !finalPath.endsWith('/') && !finalPath.includes('.')) {
+        finalPath += '/';
+    }
+
+    const targetUrl = https://api.wisphub.io/api/;
+    console.log([Proxy] Forwarding  to: );
 
     try {
         const fetchOptions = {
             method: req.method,
             headers: {
-                'Authorization': `Api-Key ${API_KEY}`,
-                'Api-Key': API_KEY, // Doubling up for compatibility
+                'Authorization': Api-Key ,
+                'Api-Key': API_KEY,
                 'Accept': 'application/json',
             }
         };
 
-        // If it's a POST/PUT request, forward the body
         if (['POST', 'PUT', 'PATCH'].includes(req.method) && req.body) {
             fetchOptions.headers['Content-Type'] = req.headers['content-type'] || 'application/json';
             fetchOptions.body = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
@@ -65,7 +76,6 @@ export default async function handler(req, res) {
 
         const response = await fetch(targetUrl, fetchOptions);
 
-        // Handle non-JSON responses gracefully
         const contentType = response.headers.get('content-type');
         if (contentType && contentType.includes('application/json')) {
             const data = await response.json();
