@@ -13,11 +13,11 @@
         return;
     }
 
-    const url = new URL(req.url, https://);
+    const url = new URL(req.url, `https://``);
     const fullPath = url.pathname;
     
     // Improved path extraction: remove /api/wisphub and ensure no leading slash for the target api path
-    let apiPath = fullPath.replace(/^\/api\/wisphub/, '');
+    let apiPath = fullPath.replace(/^\\/api\\/wisphub/, '');
     if (apiPath.startsWith('/')) apiPath = apiPath.substring(1);
     
     const searchParams = url.search;
@@ -66,14 +66,14 @@
         finalPath += '/';
     }
 
-    const targetUrl = https://api.wisphub.io/api/;
-    console.log([Proxy] Forwarding  to: );
+    const targetUrl = `https://api.wisphub.io/api/```;
+    console.log(`[Proxy] Forwarding `` to: ``);
 
     try {
         const fetchOptions = {
             method: req.method,
             headers: {
-                'Authorization': Api-Key ,
+                'Authorization': `Api-Key ``,
                 'Api-Key': API_KEY,
                 'Accept': 'application/json',
             }
