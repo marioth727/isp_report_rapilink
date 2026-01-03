@@ -24,7 +24,8 @@
 
     // Diagnostic endpoint
     if (apiPath === 'health') {
-        const key = process.env.VITE_WISPHUB_API_KEY || '';
+        // Try both with and without VITE_ prefix
+        const key = process.env.WISPHUB_API_KEY || process.env.VITE_WISPHUB_API_KEY || '';
         return res.status(200).json({
             status: 'ok',
             config: {
@@ -35,17 +36,26 @@
                 nodeVersion: process.version,
                 envType: process.env.NODE_ENV,
                 originalPath: fullPath,
-                extractedApiPath: apiPath
+                extractedApiPath: apiPath,
+                envVars: {
+                    hasWISPHUB_API_KEY: !!process.env.WISPHUB_API_KEY,
+                    hasVITE_WISPHUB_API_KEY: !!process.env.VITE_WISPHUB_API_KEY
+                }
             }
         });
     }
 
-    const API_KEY = process.env.VITE_WISPHUB_API_KEY;
+    // Try both with and without VITE_ prefix for compatibility
+    const API_KEY = process.env.WISPHUB_API_KEY || process.env.VITE_WISPHUB_API_KEY;
 
     if (!API_KEY) {
         return res.status(500).json({
-            error: 'VITE_WISPHUB_API_KEY is missing in Vercel environment.',
-            tip: 'Go to Vercel Dashboard -> Settings -> Environment Variables and ensure VITE_WISPHUB_API_KEY is set.'
+            error: 'API Key is missing in Vercel environment.',
+            tip: 'Go to Vercel Dashboard -> Settings -> Environment Variables and ensure WISPHUB_API_KEY (without VITE_ prefix) is set.',
+            debug: {
+                hasWISPHUB_API_KEY: !!process.env.WISPHUB_API_KEY,
+                hasVITE_WISPHUB_API_KEY: !!process.env.VITE_WISPHUB_API_KEY
+            }
         });
     }
 
