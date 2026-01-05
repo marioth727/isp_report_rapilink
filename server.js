@@ -30,6 +30,11 @@ app.use('/api/wisphub', (req, res, next) => {
             console.log(`[Proxy] Aplicando API Key: ${apiKey.substring(0, 4)}***`);
             proxyReq.setHeader('Authorization', `Api-Key ${apiKey}`);
         }
+
+        // Limpiar cabeceras que pueden causar 403
+        proxyReq.removeHeader('Origin');
+        proxyReq.removeHeader('Referer');
+        proxyReq.setHeader('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
     },
     onError: (err, req, res) => {
         console.error('[Proxy Error] Error al conectar con WispHub:', err.message);
