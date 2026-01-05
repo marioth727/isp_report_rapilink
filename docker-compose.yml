@@ -7,7 +7,7 @@ services:
         - VITE_SUPABASE_URL=${VITE_SUPABASE_URL}
         - VITE_SUPABASE_ANON_KEY=${VITE_SUPABASE_ANON_KEY}
     ports:
-      - "3000:3000"
+      - "3001:3000"
     environment:
       - WISPHUB_API_KEY=${WISPHUB_API_KEY}
       - VITE_SUPABASE_URL=${VITE_SUPABASE_URL}
