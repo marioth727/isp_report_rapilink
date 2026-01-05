@@ -454,8 +454,10 @@ export const WisphubService = {
 
     async getTickets(serviceId: number): Promise<any[]> {
         try {
-            // Filter tickets by service ID
-            const url = `${BASE_URL}/tickets/?limit=5&servicio=${serviceId}&ordering=-id`;
+            // Probamos ambos parámetros (WispHub a veces es inconsistente entre endpoints)
+            const url = `${BASE_URL}/tickets/?limit=5&id_servicio=${serviceId}&servicio=${serviceId}&ordering=-id`;
+            console.log(`[WispHub] Solicitando tickets para cliente ${serviceId}: ${url}`);
+
             const response = await fetch(url);
             if (!response.ok) return [];
             const data = await response.json();

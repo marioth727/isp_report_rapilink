@@ -46,7 +46,8 @@ app.all('/api/wisphub/*', async (req, res) => {
     // IMPORTANTE: Vite usa api.wisphub.io
     const targetUrl = `https://api.wisphub.io/api/${subPath}${queryString ? '?' + queryString : ''}`;
 
-    console.log(`[Proxy] Redirigiendo ${req.method} a: ${targetUrl}`);
+    console.log(`[Proxy] URL Final: ${targetUrl}`);
+    console.log(`[Proxy] Key: ${currentKey.substring(0, 4)}...`);
 
     try {
         const headers = {
