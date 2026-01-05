@@ -75,6 +75,14 @@ app.all('/api/wisphub/*', async (req, res) => {
 
         if (contentType && contentType.includes('application/json')) {
             data = await response.json();
+            // Diagnóstico para tickets si el filtrado falla
+            if (targetUrl.includes('/tickets/') && data.results) {
+                console.log(`[Proxy-Debug] Tickets devueltos: ${data.results.length}`);
+                if (data.results.length > 0) {
+                    const sample = data.results[0];
+                    console.log(`[Proxy-Debug] Muestra Ticket #1 - Servicio ID: ${sample.servicio}`);
+                }
+            }
         } else {
             const text = await response.text();
             data = { message: text.substring(0, 500) };
