@@ -463,14 +463,15 @@ export const WisphubService = {
             const data = await response.json();
             const results = data.results || [];
 
-            // FILTRO DE SEGURIDAD FRONTEND: WispHub a veces devuelve tickets globales si el filtro falla.
-            // Forzamos que el ticket pertenezca SI o SI a este servicioId.
-            const filtered = results.filter((t: any) =>
-                Number(t.servicio) === Number(serviceId) ||
-                Number(t.id_servicio) === Number(serviceId)
-            );
+            // FILTRO DE SEGURIDAD FRONTEND: WispHub a veces devuelve tickets globales.
+            // Forzamos que el ticket pertenezca SI o SI a este servicioId mediante varias posibles llaves.
+            const filtered = results.filter((t: any) => {
+                const targetId = Number(serviceId);
+                return [t.servicio, t.id_servicio, t.id_servicio_internet, t.servicio_id]
+                    .some(val => Number(val) === targetId);
+            });
 
-            console.log(`[WispHub-Debug] Recibidos: ${results.length}, Filtrados para el cliente: ${filtered.length}`);
+            console.log(`[WispHub-Debug] Recibidos: ${results.length}, Filtrados para cliente ${serviceId}: ${filtered.length}`);
             return filtered;
         } catch (error) {
             console.error("WispHub Get Tickets Error:", error);
