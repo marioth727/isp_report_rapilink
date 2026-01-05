@@ -454,14 +454,24 @@ export const WisphubService = {
 
     async getTickets(serviceId: number): Promise<any[]> {
         try {
-            // Probamos ambos parámetros (WispHub a veces es inconsistente entre endpoints)
-            const url = `${BASE_URL}/tickets/?limit=5&id_servicio=${serviceId}&servicio=${serviceId}&ordering=-id`;
-            console.log(`[WispHub] Solicitando tickets para cliente ${serviceId}: ${url}`);
+            // Intentamos filtrar en la API, pero ante la duda, filtramos nosotros también abajo
+            const url = `${BASE_URL}/tickets/?limit=20&servicio=${serviceId}&id_servicio=${serviceId}&ordering=-id`;
+            console.log(`[WispHub] Solicitando tickets para cliente ${serviceId}`);
 
             const response = await fetch(url);
             if (!response.ok) return [];
             const data = await response.json();
-            return data.results || [];
+            const results = data.results || [];
+
+            // FILTRO DE SEGURIDAD FRONTEND: WispHub a veces devuelve tickets globales si el filtro falla.
+            // Forzamos que el ticket pertenezca SI o SI a este servicioId.
+            const filtered = results.filter((t: any) =>
+                Number(t.servicio) === Number(serviceId) ||
+                Number(t.id_servicio) === Number(serviceId)
+            );
+
+            console.log(`[WispHub-Debug] Recibidos: ${results.length}, Filtrados para el cliente: ${filtered.length}`);
+            return filtered;
         } catch (error) {
             console.error("WispHub Get Tickets Error:", error);
             return [];
