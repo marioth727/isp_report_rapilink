@@ -16,7 +16,7 @@ app.use(express.json());
 
 // Proxy Manual para WispHub (Basado en la lógica exitosa de Vercel)
 app.all('/api/wisphub/*', async (req, res) => {
-    const apiKey = (process.env.WISPHUB_API_KEY || '').trim();
+    const apiKey = (process.env.WISPHUB_API_KEY || process.env.VITE_WISPHUB_API_KEY || '').trim();
     // Extraemos la parte de la URL después de /api/wisphub/
     const targetPath = req.params[0] || req.path.replace('/api/wisphub/', '');
     const queryString = req.url.split('?')[1] || '';
