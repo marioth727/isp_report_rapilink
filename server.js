@@ -27,6 +27,7 @@ app.use('/api/wisphub', (req, res, next) => {
         if (!apiKey) {
             console.error('[Proxy Error] WISPHUB_API_KEY no encontrada en variables de entorno');
         } else {
+            console.log(`[Proxy] Aplicando API Key: ${apiKey.substring(0, 4)}***`);
             proxyReq.setHeader('Authorization', `Api-Key ${apiKey}`);
         }
     },
