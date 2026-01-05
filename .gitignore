@@ -25,6 +25,9 @@ dist-ssr
 !vite.config.*
 !eslint.config.*
 !tailwind.config.*
+!server.js
+!Dockerfile
+!docker-compose.yml
 api_test_result.json
 temp_client.json
 
