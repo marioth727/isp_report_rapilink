@@ -13,17 +13,26 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Configuración del Proxy para WispHub
-app.use('/api/wisphub', createProxyMiddleware({
+app.use('/api/wisphub', (req, res, next) => {
+    console.log(`[Proxy] Solicitud recibida: ${req.method} ${req.url}`);
+    next();
+}, createProxyMiddleware({
     target: 'https://wisphub.net/api',
     changeOrigin: true,
     pathRewrite: {
         '^/api/wisphub': '',
     },
-    onProxyReq: (proxyReq) => {
+    onProxyReq: (proxyReq, req, res) => {
         const apiKey = process.env.WISPHUB_API_KEY;
-        if (apiKey) {
+        if (!apiKey) {
+            console.error('[Proxy Error] WISPHUB_API_KEY no encontrada en variables de entorno');
+        } else {
             proxyReq.setHeader('Authorization', `Api-Key ${apiKey}`);
         }
+    },
+    onError: (err, req, res) => {
+        console.error('[Proxy Error] Error al conectar con WispHub:', err.message);
+        res.status(500).json({ error: 'Error de conexión con el proveedor (Proxy)' });
     },
     logLevel: 'debug'
 }));
