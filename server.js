@@ -23,15 +23,21 @@ app.use('/api/wisphub', (req, res, next) => {
         '^/api/wisphub': '',
     },
     onProxyReq: (proxyReq, req, res) => {
-        const apiKey = process.env.WISPHUB_API_KEY;
+        const apiKey = (process.env.WISPHUB_API_KEY || '').trim();
+
         if (!apiKey) {
             console.error('[Proxy Error] WISPHUB_API_KEY no encontrada en variables de entorno');
         } else {
             console.log(`[Proxy] Aplicando API Key: ${apiKey.substring(0, 4)}***`);
+
+            // Replicamos la configuración exacta que funcionaba en Vercel
             proxyReq.setHeader('Authorization', `Api-Key ${apiKey}`);
+            proxyReq.setHeader('Api-Key', apiKey);
+            proxyReq.setHeader('Accept', 'application/json');
+            proxyReq.setHeader('Host', 'wisphub.net');
         }
 
-        // Limpiar cabeceras que pueden causar 403
+        // Limpiar cabeceras que pueden causar conflictos de seguridad (403)
         proxyReq.removeHeader('Origin');
         proxyReq.removeHeader('Referer');
         proxyReq.setHeader('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
