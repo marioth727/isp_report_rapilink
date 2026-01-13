@@ -26,6 +26,7 @@ dist-ssr
 !eslint.config.*
 !tailwind.config.*
 !server.js
+!postcss.config.*
 !Dockerfile
 !docker-compose.yml
 api_test_result.json
