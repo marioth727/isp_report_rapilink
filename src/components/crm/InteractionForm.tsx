@@ -1,7 +1,7 @@
 import { useForm } from 'react-hook-form';
 import { supabase } from '../../lib/supabase';
 import { useState, useEffect } from 'react';
-import { Save, User, Phone, Clock, DollarSign, AlertCircle, Wrench, BookOpen, Search, Loader2, Play, Square, AlertTriangle } from 'lucide-react';
+import { Save, User, Phone, Clock, DollarSign, AlertCircle, Wrench, BookOpen, Search, Loader2, Play, Square, Activity, Zap, ExternalLink, RefreshCw } from 'lucide-react';
 import type { CRMInteraction } from '../../types';
 import { PREDEFINED_OBJECTIONS, REPORT_CATEGORIES, PLAN_OPTIONS } from '../../types';
 import clsx from 'clsx';
@@ -16,31 +16,20 @@ interface InteractionFormProps {
     previousInteraction?: CRMInteraction | null;
 }
 
-// Fallback precios manuales si la API falla (Plan B)
-const PLAN_PRICES_FALLBACK: Record<string, number> = {
-    'ELITE': 199900,
-    'ULTRA': 80000,
-    'FAMILIA': 60000,
-    'HOGAR': 69900,
-    'INTERNET 100MB FO': 55000
-};
-
 // Helper to get robust price from WispHub plan
-const getPlanPrice = (plan: any) => {
-    // 1. Try API fields
-    let p = plan.precio || plan.Precio || plan.costo || plan.mensualidad || 0;
-    p = Number(p);
+const getPlanPrice = (val: any) => {
+    if (!val) return 0;
+    const priceStr = typeof val === 'object'
+        ? (val.precio || val.Precio || val.costo || val.mensualidad || 0)
+        : val;
 
-    // 2. Fallback: Search by name similarity if API returned 0
-    if (p === 0 && plan.nombre) {
-        const name = plan.nombre.toUpperCase();
-        for (const [key, price] of Object.entries(PLAN_PRICES_FALLBACK)) {
-            if (name.includes(key)) {
-                return price;
-            }
-        }
+    if (typeof priceStr === 'string') {
+        // Remove everything except digits and the FIRST dot/comma
+        const clean = priceStr.replace(/[^0-9.,]/g, '').replace(',', '.');
+        const price = parseFloat(clean);
+        return isNaN(price) ? 0 : price;
     }
-    return p;
+    return Number(priceStr) || 0;
 };
 
 export function InteractionForm({ onSuccess, initialValues, preSelectedClient, previousInteraction }: InteractionFormProps) {
@@ -70,6 +59,15 @@ export function InteractionForm({ onSuccess, initialValues, preSelectedClient, p
     const [timerSeconds, setTimerSeconds] = useState(0);
     const [isTimerRunning, setIsTimerRunning] = useState(false);
     const [isManualDuration, setIsManualDuration] = useState(false);
+    const [activeTab, setActiveTab] = useState<'scripts' | 'tickets'>('scripts');
+    const [loadingTickets, setLoadingTickets] = useState(false);
+    const [fullClientData, setFullClientData] = useState<any>(null);
+    const [portalLink, setPortalLink] = useState<string | null>(null);
+
+    // Daily Stats State
+    const [dailyGestiones, setDailyGestiones] = useState(0);
+    const [avgNps, setAvgNps] = useState(0);
+    const [pendingFollowups, setPendingFollowups] = useState<any[]>([]);
 
     const { register, handleSubmit, reset, watch, setValue, formState: { errors } } = useForm<CRMInteraction>({
         defaultValues: {
@@ -140,12 +138,55 @@ export function InteractionForm({ onSuccess, initialValues, preSelectedClient, p
         return `${m}:${s}`;
     };
 
+    const fetchDailyStats = async () => {
+        try {
+            const { data: { user } } = await supabase.auth.getUser();
+            if (!user) return;
+
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            const endOfDay = new Date();
+            endOfDay.setHours(23, 59, 59, 999);
+
+            // Fetch daily count and NPS
+            const { data: interactions } = await supabase
+                .from('crm_interactions')
+                .select('nps')
+                .eq('user_id', user.id)
+                .gte('created_at', today.toISOString());
+
+            if (interactions) {
+                setDailyGestiones(interactions.length);
+                const npsValues = interactions.filter(i => i.nps !== null && i.nps !== undefined).map(i => i.nps);
+                const avg = npsValues.length > 0 ? npsValues.reduce((a: number, b: number) => a + b, 0) / npsValues.length : 0;
+                setAvgNps(avg);
+            }
+
+            // Fetch pending follow-ups for TODAY
+            const { data: followups } = await supabase
+                .from('crm_interactions')
+                .select('id, client_reference, scheduled_followup')
+                .eq('user_id', user.id)
+                .gte('scheduled_followup', today.toISOString())
+                .lte('scheduled_followup', endOfDay.toISOString());
+
+            setPendingFollowups(followups || []);
+
+        } catch (err) {
+            console.error("Error fetching daily stats:", err);
+        }
+    };
+
+    useEffect(() => {
+        fetchDailyStats();
+    }, []);
+
 
     // Reset/Populate form when initialValues changes & Load Plans from WispHub
     useEffect(() => {
         const loadData = async () => {
-            // Fetch plans list FAST (without details)
-            const plans = await WisphubService.getInternetPlans(false);
+            // Fetch plans list
+            const plans = await WisphubService.getInternetPlans();
             if (plans.length > 0) {
                 setWispHubPlans(plans);
             }
@@ -214,6 +255,17 @@ export function InteractionForm({ onSuccess, initialValues, preSelectedClient, p
         }
     }, [selectedClientId]);
 
+    const refreshSpecificTicket = async (ticketId: string | number) => {
+        try {
+            const updated = await WisphubService.getTicketDetail(ticketId);
+            if (updated) {
+                setRecentTickets(prev => prev.map(t => t.id === updated.id ? updated : t));
+            }
+        } catch (error) {
+            console.error("Error refreshing ticket:", error);
+        }
+    };
+
     const result = watch('result');
     const isSpecialCase = watch('is_special_case');
     const technicianRequired = watch('technician_required');
@@ -224,56 +276,59 @@ export function InteractionForm({ onSuccess, initialValues, preSelectedClient, p
             const { data: { user } } = await supabase.auth.getUser();
             if (!user) throw new Error('No user found');
 
-            // 1. WispHub Ticket Creation (if applicable)
-            if (isTechSupport || technicianRequired) {
-                // Validate required fields for ticket
-                const ticketDescription = (document.getElementById('ticket_description') as HTMLTextAreaElement)?.value;
-                const ticketSubject = (document.getElementById('ticket_subject') as HTMLSelectElement)?.value;
-                const ticketPriority = (document.getElementById('ticket_priority') as HTMLSelectElement)?.value;
-                const ticketTechnicianSelect = (document.getElementById('ticket_technician') as HTMLSelectElement)?.value;
-                const ticketTechnicianManual = (document.getElementById('ticket_technician_manual') as HTMLInputElement)?.value;
-                const ticketTechnician = ticketTechnicianManual || ticketTechnicianSelect;
+            // 1. WispHub Sync (Technical Ticket and/or Interaction Note)
+            if (selectedClientId) {
+                const username = user.user_metadata?.full_name || user.email?.split('@')[0] || 'Asesor';
+                const mainNote = (document.getElementById('interaction_description') as HTMLTextAreaElement)?.value || data.special_case_description || '';
 
-                console.log('[DEBUG] Ticket Data:', {
-                    servicio: selectedClientId,
-                    asunto: ticketSubject,
-                    descripcion: ticketDescription,
-                    prioridad: ticketPriority,
-                    technicianId: ticketTechnician
-                });
+                // A. Update Global Client Comments (Universal Sync)
+                const crmNote = [
+                    `[CRM - ${username}]`,
+                    `Resultado: ${data.result}`,
+                    data.objection ? `Objeción: ${data.objection}` : null,
+                    data.suggested_plan ? `Plan Sugerido: ${data.suggested_plan}` : null,
+                    data.price_difference ? `Diferencia: $${data.price_difference}` : null,
+                    `NPS: ${data.nps ?? 'N/A'}`,
+                    `Duración: ${data.duration_min} min`,
+                    `Nota: ${mainNote}`
+                ].filter(Boolean).join(' | ');
 
-                if (!selectedClientId) {
-                    alert('⚠️ Debes buscar y seleccionar un cliente de WispHub para crear un ticket.');
-                    setSaving(false);
-                    return;
-                }
+                await WisphubService.updateClientComments(selectedClientId, crmNote);
 
-                if (!ticketDescription || ticketDescription.length < 5) {
-                    alert('⚠️ La descripción del ticket es muy corta.');
-                    setSaving(false);
-                    return;
-                }
+                // B. Create Technical Ticket (if applicable)
+                if (isTechSupport || technicianRequired) {
+                    const ticketDescription = (document.getElementById('ticket_description') as HTMLTextAreaElement)?.value || mainNote;
+                    const ticketSubject = (document.getElementById('ticket_subject') as HTMLSelectElement)?.value || 'Gestión desde Plataforma';
+                    const ticketPriority = (document.getElementById('ticket_priority') as HTMLSelectElement)?.value;
+                    const ticketTechnicianSelect = (document.getElementById('ticket_technician') as HTMLSelectElement)?.value;
+                    const ticketTechnicianManual = (document.getElementById('ticket_technician_manual') as HTMLInputElement)?.value;
+                    const ticketTechnician = ticketTechnicianManual || ticketTechnicianSelect;
 
-                // Call API
-                const ticketResult = await WisphubService.createTicket({
-                    servicio: selectedClientId,
-                    asunto: ticketSubject || 'Internet Lento',
-                    descripcion: ticketDescription,
-                    prioridad: parseInt(ticketPriority || '2'),
-                    technicianId: ticketTechnician || undefined // Pass technician ID if provided
-                });
-
-                if (!ticketResult.success) {
-                    if (!confirm(`❌ Error creando ticket en WispHub: ${ticketResult.message}\n\n¿Deseas guardar la gestión de todas formas?`)) {
+                    if (!ticketDescription || ticketDescription.length < 3) {
+                        alert('⚠️ La descripción del ticket es muy corta.');
                         setSaving(false);
                         return;
                     }
-                } else {
-                    alert(`✅ Ticket creado exitosamente en WispHub.`);
+
+                    const ticketResult = await WisphubService.createTicket({
+                        servicio: selectedClientId,
+                        asunto: ticketSubject,
+                        descripcion: `[CRM - ${username}] ${ticketDescription}`,
+                        prioridad: parseInt(ticketPriority || '2'),
+                        technicianId: ticketTechnician || undefined
+                    });
+
+                    if (ticketResult.success) {
+                        alert(`✅ Ticket creado exitosamente en WispHub bajo la etiqueta "CRM - Report".`);
+                    } else {
+                        const errorMsg = `❌ Error en WispHub: ${ticketResult.message}`;
+                        alert(errorMsg);
+                        console.error(errorMsg);
+                    }
                 }
             }
 
-            // 2. Save Interaction to Supabase
+            // 2. Save Interaction to Supabase (Existing logic)
             const interactionData = {
                 ...data,
                 user_id: user.id,
@@ -363,12 +418,14 @@ export function InteractionForm({ onSuccess, initialValues, preSelectedClient, p
                 scheduled_followup: undefined
             });
             setCurrentPlanPrice(0);
+            setRecentTickets([]);
             setSelectedClientId(null);
 
             // Reset Timer
             setIsTimerRunning(false);
             setTimerSeconds(0);
             setIsManualDuration(false);
+            fetchDailyStats(); // Refresh dashboard
             onSuccess();
         } catch (error: any) {
             alert('Error al guardar: ' + error.message);
@@ -389,7 +446,9 @@ export function InteractionForm({ onSuccess, initialValues, preSelectedClient, p
         try {
             const results = await WisphubService.searchClients(query);
             setSearchResults(results);
-            if (results.length === 0) alert("No se encontraron clientes en WispHub");
+            if (results.length === 0) {
+                alert("No se encontraron clientes en WispHub");
+            }
         } catch (error) {
             console.error(error);
             alert("Error buscando en WispHub");
@@ -408,21 +467,35 @@ export function InteractionForm({ onSuccess, initialValues, preSelectedClient, p
         if (client.plan_internet?.nombre) {
             setValue('current_plan', client.plan_internet.nombre);
 
-            // 1. Try to get real details (Speed & Price) from WispHub
-            const fastPlanMatching = wispHubPlans.find(p => p.nombre === client.plan_internet?.nombre);
-            if (fastPlanMatching?.id) {
-                WisphubService.getPlanDetails(fastPlanMatching.id).then(details => {
-                    if (details) {
-                        console.log("[WispHub] Loaded real current plan details:", details);
-                        setCurrentPlanPrice(details.precio);
-                        setCurrentPlanDetails(details);
-                    }
+            const findAndSetPrice = (allPlans: WispHubPlan[]) => {
+                const targetName = (client.plan_internet.nombre || '').trim();
+                const normalize = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+
+                let match = allPlans.find(p => p.nombre.trim().toLowerCase() === targetName.toLowerCase());
+                if (!match) match = allPlans.find(p => normalize(p.nombre) === normalize(targetName));
+
+                if (match?.id) {
+                    WisphubService.getPlanDetails(match.id, match.tipo).then((details: any) => {
+                        if (details) {
+                            const price = details.precio || details.Precio || details.costo || 0;
+                            const numericPrice = getPlanPrice(price);
+                            setCurrentPlanPrice(numericPrice);
+                            setCurrentPlanDetails(details);
+                        }
+                    });
+                } else {
+                    setCurrentPlanPrice(getPlanPrice(client.plan_internet));
+                }
+            };
+
+            // If plans aren't loaded yet, fetch them now
+            if (wispHubPlans.length === 0) {
+                WisphubService.getInternetPlans().then(plans => {
+                    setWispHubPlans(plans);
+                    findAndSetPrice(plans);
                 });
             } else {
-                // Fallback to basic if ID not found immediately
-                const price = getPlanPrice(client.plan_internet);
-                setCurrentPlanPrice(price);
-                setCurrentPlanDetails(null);
+                findAndSetPrice(wispHubPlans);
             }
         }
 
@@ -432,12 +505,26 @@ export function InteractionForm({ onSuccess, initialValues, preSelectedClient, p
 
         setShowResults(false);
 
-        // Check Balance
+        // Check Balance and Fetch Tickets
         if (client.id_servicio) {
+            setRecentTickets([]);
+            setLoadingTickets(true);
+
+            // Fetch only what's needed for management and tickets history
+            Promise.all([
+                WisphubService.getTickets(client.id_servicio, client.nombre, client.cedula),
+                WisphubService.getServiceDetail(client.id_servicio),
+                WisphubService.getClientPortalLink(client.id_servicio)
+            ]).then(([tickets, detail, link]) => {
+                setRecentTickets(tickets);
+                setFullClientData({ ...client, ...detail });
+                setPortalLink(link);
+                setLoadingTickets(false);
+            });
+
             const balance = await WisphubService.getClientBalance(client.id_servicio);
             if (balance > 0) {
                 setBalanceAlert(balance);
-                alert(`⚠️ ATENCIÓN: El cliente tiene saldo pendiente de $${balance}`);
             } else {
                 setBalanceAlert(null);
             }
@@ -452,584 +539,933 @@ export function InteractionForm({ onSuccess, initialValues, preSelectedClient, p
     const category = watch('migration_category');
     const currentObjection = watch('objection');
 
-    // Auto-select client effect - Optimized to be faster
+    // Auto-select client effect
     useEffect(() => {
         if (preSelectedClient) {
-            console.log("Auto-selecting client:", preSelectedClient);
-            // We select basic info immediately without waiting for plans
             selectClient(preSelectedClient);
         }
-    }, [preSelectedClient]); // Don't wait for wispHubPlans here
+    }, [preSelectedClient]);
 
+    const getClientHealth = () => {
+        if (!selectedClientId) return null;
+
+        const wispStatus = fullClientData?.estado || 'Desconocido';
+        const hasDebt = (balanceAlert || 0) > 0;
+        const hasOpenTickets = recentTickets.some(t => t.id_estado !== 3); // 3 is usually 'Cerrado'
+
+        const badges = [];
+        const statusLower = wispStatus.toLowerCase();
+
+        // 1. Main Status Badge
+        let mainColor = 'green';
+        if (statusLower.includes('cancelado') || statusLower.includes('retirado')) {
+            mainColor = 'red';
+        } else if (statusLower.includes('suspendido')) {
+            mainColor = 'orange';
+        } else if (statusLower.includes('gratis') || statusLower.includes('cortesia') || statusLower.includes('cortesía')) {
+            mainColor = 'blue';
+        } else if (statusLower.includes('activo')) {
+            mainColor = 'green';
+        }
+
+        badges.push({
+            color: mainColor,
+            label: wispStatus.toUpperCase(),
+            icon: mainColor === 'red' ? '🔴' : mainColor === 'orange' ? '🟠' : mainColor === 'blue' ? '🔵' : '🟢',
+            desc: `Estado: ${wispStatus}`
+        });
+
+        // 2. Alert Badge (Beside the main one)
+        if (hasDebt || hasOpenTickets) {
+            badges.push({
+                color: 'yellow',
+                label: 'CON ALERTA',
+                icon: '🟡',
+                desc: `${hasDebt ? 'Deuda pendiente' : ''}${hasOpenTickets ? ' | Tickets abiertos' : ''}`
+            });
+        }
+
+        return badges;
+    };
+
+    const healthBadges = getClientHealth();
 
     return (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 relative">
-            {/* ... Modal ... */}
-            <button
-                type="button"
-                onClick={() => setShowMobileScripts(true)}
-                className="lg:hidden fixed bottom-6 right-6 z-40 bg-indigo-600 text-white p-4 rounded-full shadow-lg shadow-indigo-500/30 hover:bg-indigo-700 transition-transform active:scale-90 flex items-center justify-center"
-            >
-                <BookOpen className="w-6 h-6" />
-            </button>
+        <div className="flex flex-col gap-6 relative">
+            {/* Daily Dashboard & Alerts */}
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4 animate-in fade-in slide-in-from-top-4 duration-700">
+                <div className="bg-gradient-to-br from-indigo-600 to-violet-700 text-white p-4 rounded-2xl shadow-lg shadow-indigo-500/20 flex items-center gap-4 border border-white/10 group hover:scale-[1.02] transition-transform cursor-pointer">
+                    <div className="bg-white/20 p-3 rounded-xl group-hover:rotate-12 transition-transform">
+                        <Activity className="w-6 h-6" />
+                    </div>
+                    <div>
+                        <p className="text-[10px] opacity-70 font-black uppercase tracking-widest leading-none mb-1">Logros del Día</p>
+                        <h3 className="text-2xl font-black leading-none">{dailyGestiones} <span className="text-xs font-medium opacity-60 italic">gestiones</span></h3>
+                    </div>
+                </div>
 
-            <Modal
-                isOpen={showMobileScripts}
-                onClose={() => setShowMobileScripts(false)}
-                title="Guiones de Venta"
-            >
-                <ScriptViewer category={category || ''} objection={currentObjection || null} />
-            </Modal>
+                <div className="bg-gradient-to-br from-emerald-500 to-teal-600 text-white p-4 rounded-2xl shadow-lg shadow-emerald-500/20 flex items-center gap-4 border border-white/10 group hover:scale-[1.02] transition-transform cursor-pointer">
+                    <div className="bg-white/20 p-3 rounded-xl group-hover:scale-110 transition-transform">
+                        <Zap className="w-6 h-6 fill-current" />
+                    </div>
+                    <div>
+                        <p className="text-[10px] opacity-70 font-black uppercase tracking-widest leading-none mb-1">NPS Promedio</p>
+                        <h3 className="text-2xl font-black leading-none">{avgNps.toFixed(1)} <span className="text-xs font-medium opacity-60">/ 10</span></h3>
+                    </div>
+                </div>
 
-            <div className="lg:col-span-2">
-                <form onSubmit={handleSubmit(onSubmit)} className="bg-card p-6 rounded-xl border border-border shadow-sm space-y-6">
-                    <h3 className="text-lg font-bold text-primary flex items-center gap-2">
-                        <Phone className="w-5 h-5" /> Nueva Gestión
-                    </h3>
-
-                    {/* Context Alert for Re-engagement */}
-                    {previousInteraction && !initialValues && (
-                        <div className="bg-amber-100 border-l-4 border-amber-500 text-amber-700 p-4 rounded shadow-sm animate-in slide-in-from-top-2">
-                            <div className="flex items-start gap-3">
-                                <AlertCircle className="w-5 h-5 mt-0.5 flex-shrink-0" />
-                                <div>
-                                    <p className="font-bold text-sm">💡 Contexto de Re-ingreso</p>
-                                    <p className="text-sm mt-1">
-                                        Este cliente fue gestionado el <b>{new Date(previousInteraction.created_at || '').toLocaleDateString()}</b>.
-                                    </p>
-                                    <ul className="list-disc list-inside text-xs mt-2 space-y-1">
-                                        <li><b>Resultado:</b> {previousInteraction.result}</li>
-                                        <li><b>Objeción:</b> {previousInteraction.objection || 'Ninguna'}</li>
-                                        <li><b>Plan Sugerido:</b> {previousInteraction.suggested_plan || 'N/A'}</li>
-                                    </ul>
-                                </div>
+                {pendingFollowups.length > 0 ? (
+                    <div className="md:col-span-2 bg-gradient-to-br from-amber-500 to-orange-600 text-white p-4 rounded-2xl shadow-lg shadow-amber-500/20 flex items-center justify-between border border-white/10 animate-pulse-slow">
+                        <div className="flex items-center gap-4">
+                            <div className="bg-white/20 p-3 rounded-xl">
+                                <Clock className="w-6 h-6" />
+                            </div>
+                            <div>
+                                <p className="text-[10px] opacity-80 font-black uppercase tracking-widest leading-none mb-1">¡Seguimientos Hoy!</p>
+                                <p className="text-sm font-bold line-clamp-1">Tienes {pendingFollowups.length} llamadas pendientes de "Lo pensará"</p>
                             </div>
                         </div>
-                    )}
+                        <button
+                            type="button"
+                            onClick={() => setActiveTab('tickets')}
+                            className="bg-white/20 hover:bg-white/30 p-2 rounded-lg text-xs font-bold transition-colors"
+                        >
+                            Ver Lista
+                        </button>
+                    </div>
+                ) : (
+                    <div className="md:col-span-2 bg-slate-100 dark:bg-slate-800/50 text-slate-400 p-4 rounded-2xl border border-dashed border-slate-300 dark:border-slate-700 flex items-center gap-4">
+                        <div className="p-3 rounded-xl border border-dashed border-slate-300">
+                            <Clock className="w-6 h-6 opacity-40" />
+                        </div>
+                        <p className="text-sm italic">No tienes seguimientos pendientes para hoy.</p>
+                    </div>
+                )}
+            </div>
 
-                    {/* Ticket History Context */}
-                    {selectedClientId && recentTickets.length > 0 && (
-                        <div className="bg-red-50 border-l-4 border-red-500 text-red-700 p-4 rounded shadow-sm animate-in slide-in-from-top-2">
-                            <div className="flex items-start gap-3">
-                                <AlertCircle className="w-5 h-5 mt-0.5 flex-shrink-0" />
-                                <div className="w-full">
-                                    <p className="font-bold text-sm">🚩 Historial de Fallas Recientes</p>
-                                    <p className="text-xs mb-2">Este cliente tiene {recentTickets.length} tickets reportados. Verifica antes de vender.</p>
-                                    <div className="max-h-32 overflow-y-auto space-y-2 pr-2">
-                                        {recentTickets.map((t: any) => (
-                                            <div key={t.id} className="text-xs bg-white/50 p-2 rounded border border-red-100">
-                                                <p className="font-semibold">{t.asunto || 'Sin Asunto'} <span className="opacity-70">({t.fecha_creacion?.split(' ')[0]})</span></p>
-                                                <p className="line-clamp-2 italic opacity-80">{t.descripcion}</p>
-                                                <span className={clsx("text-[10px] px-1 rounded", t.estado === 'Abierto' ? "bg-red-200 text-red-900" : "bg-gray-200")}>
-                                                    {t.estado === '1' ? 'Abierto' : 'Cerrado/Resuelto'}
-                                                </span>
-                                            </div>
-                                        ))}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 relative">
+                {/* ... Modal ... */}
+                <button
+                    type="button"
+                    onClick={() => setShowMobileScripts(true)}
+                    className="lg:hidden fixed bottom-6 right-6 z-40 bg-indigo-600 text-white p-4 rounded-full shadow-lg shadow-indigo-500/30 hover:bg-indigo-700 transition-transform active:scale-90 flex items-center justify-center"
+                >
+                    <BookOpen className="w-6 h-6" />
+                </button>
+
+                <Modal
+                    isOpen={showMobileScripts}
+                    onClose={() => setShowMobileScripts(false)}
+                    title="Guiones de Venta"
+                >
+                    <ScriptViewer category={category || ''} objection={currentObjection || null} />
+                </Modal>
+
+                <div className="lg:col-span-2">
+                    <form onSubmit={handleSubmit(onSubmit)} className="bg-card p-6 rounded-xl border border-border shadow-sm space-y-6">
+                        <div className="flex justify-between items-center">
+                            <h3 className="text-lg font-bold text-primary flex items-center gap-3">
+                                <Phone className="w-5 h-5" />
+                                <span>Nueva Gestión</span>
+                                {healthBadges?.map((badge, idx) => (
+                                    <div key={idx} className={clsx(
+                                        "flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-black border animate-in zoom-in-95 duration-500",
+                                        badge.color === 'red' ? "bg-red-500 text-white border-red-600 shadow-lg shadow-red-500/20" :
+                                            badge.color === 'orange' ? "bg-orange-500 text-white border-orange-600 shadow-lg shadow-orange-500/20" :
+                                                badge.color === 'yellow' ? "bg-yellow-400 text-yellow-950 border-yellow-500 shadow-lg shadow-yellow-400/20" :
+                                                    badge.color === 'blue' ? "bg-blue-500 text-white border-blue-600 shadow-lg shadow-blue-500/20" :
+                                                        "bg-emerald-500 text-white border-emerald-600 shadow-lg shadow-emerald-500/20"
+                                    )} title={badge.desc}>
+                                        <span className="relative flex h-2 w-2">
+                                            <span className={clsx(
+                                                "animate-ping absolute inline-flex h-full w-full rounded-full opacity-75",
+                                                badge.color === 'yellow' ? "bg-yellow-900" : "bg-white"
+                                            )}></span>
+                                            <span className={clsx(
+                                                "relative inline-flex rounded-full h-2 w-2",
+                                                badge.color === 'yellow' ? "bg-yellow-900" : "bg-white"
+                                            )}></span>
+                                        </span>
+                                        {badge.label}
+                                    </div>
+                                ))}
+                            </h3>
+                            {recentTickets.length > 0 && (
+                                <div className="flex items-center gap-2 bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 px-3 py-1 rounded-full text-xs font-bold animate-pulse">
+                                    <AlertCircle className="w-3 h-3" />
+                                    {recentTickets.length} Tickets Recientes
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Context Alert for Re-engagement */}
+                        {previousInteraction && !initialValues && (
+                            <div className="bg-amber-100 border-l-4 border-amber-500 text-amber-700 p-4 rounded shadow-sm animate-in slide-in-from-top-2">
+                                <div className="flex items-start gap-3">
+                                    <AlertCircle className="w-5 h-5 mt-0.5 flex-shrink-0" />
+                                    <div>
+                                        <p className="font-bold text-sm">💡 Contexto de Re-ingreso</p>
+                                        <p className="text-sm mt-1">
+                                            Este cliente fue gestionado el <b>{new Date(previousInteraction.created_at || '').toLocaleDateString()}</b>.
+                                        </p>
+                                        <ul className="list-disc list-inside text-xs mt-2 space-y-1">
+                                            <li><b>Resultado:</b> {previousInteraction.result}</li>
+                                            <li><b>Objeción:</b> {previousInteraction.objection || 'Ninguna'}</li>
+                                            <li><b>Plan Sugerido:</b> {previousInteraction.suggested_plan || 'N/A'}</li>
+                                        </ul>
                                     </div>
                                 </div>
                             </div>
-                        </div>
-                    )}
+                        )}
 
-                    {/* ... Inputs ... */}
-                    {/* Leaving inputs as existing code, jumping to Result section update */}
-
-                    {/* (This replacement block is getting too large, I will focus on onSubmit + Result Logic + Tech Support UI) */}
-
-                    {/* REUSING EXISTING INPUTS... */}
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div className="space-y-1 relative">
-                            <label className="text-xs font-medium text-muted-foreground">Cliente / ID <span className="text-red-500">*</span></label>
-                            <div className="flex gap-2">
-                                <div className="relative flex-1">
-                                    <User className="absolute left-3 top-2.5 w-4 h-4 text-muted-foreground" />
-                                    <input
-                                        {...register('client_reference', { required: true })}
-                                        className={clsx(
-                                            "w-full pl-9 bg-background border rounded-md p-2 text-sm focus:ring-2 focus:ring-primary/50 focus:outline-none",
-                                            errors.client_reference ? "border-red-500 ring-1 ring-red-500" : "border-input"
-                                        )}
-                                        placeholder="Buscar por Nombre o Cédula..."
-                                        autoComplete="off"
-                                    />
-                                </div>
-                                <button
-                                    type="button"
-                                    onClick={handleSearch}
-                                    disabled={searching}
-                                    className="bg-indigo-600 hover:bg-indigo-700 text-white p-2 rounded-md transition-colors"
-                                    title="Buscar en WispHub"
-                                >
-                                    {searching ? <Loader2 className="w-5 h-5 animate-spin" /> : <Search className="w-5 h-5" />}
-                                </button>
-                            </div>
-                            {/* Results Dropdown */}
-                            {showResults && searchResults.length > 0 && (
-                                <div className="absolute z-50 top-full left-0 right-0 mt-1 bg-card border border-border rounded-md shadow-xl max-h-60 overflow-y-auto">
-                                    <div className="p-2 border-b border-border flex justify-between items-center bg-muted/30">
-                                        <span className="text-xs font-bold text-muted-foreground">Resultados WispHub</span>
-                                        <button type="button" onClick={() => setShowResults(false)} className="text-xs text-red-500 hover:underline">Cerrar</button>
-                                    </div>
-                                    {searchResults.map(client => (
-                                        <div
-                                            key={client.id_servicio}
-                                            onClick={() => selectClient(client)}
-                                            className="p-3 hover:bg-muted/50 cursor-pointer border-b border-border/50 last:border-0 transition-colors"
-                                        >
-                                            <p className="font-bold text-sm text-foreground">{client.nombre}</p>
-                                            <div className="flex justify-between text-xs text-muted-foreground mt-1">
-                                                <span>CC: {client.cedula}</span>
-                                                <span className={clsx(
-                                                    "px-1.5 py-0.5 rounded text-[10px]",
-                                                    client.estado === 'Activo' ? 'bg-green-500/20 text-green-600' : 'bg-red-500/20 text-red-600'
-                                                )}>{client.estado}</span>
-                                            </div>
-                                            <p className="text-xs text-indigo-500 mt-0.5">{client.plan_internet?.nombre || 'Sin Plan'}</p>
+                        {/* Ticket History Context */}
+                        {selectedClientId && recentTickets.length > 0 && (
+                            <div className="bg-red-50 border-l-4 border-red-500 text-red-700 p-4 rounded shadow-sm animate-in slide-in-from-top-2">
+                                <div className="flex items-start gap-3">
+                                    <AlertCircle className="w-5 h-5 mt-0.5 flex-shrink-0" />
+                                    <div className="w-full">
+                                        <p className="font-bold text-sm">🚩 Historial de Fallas Recientes</p>
+                                        <p className="text-xs mb-2">Este cliente tiene {recentTickets.length} tickets reportados. Verifica antes de vender.</p>
+                                        <div className="max-h-32 overflow-y-auto space-y-2 pr-2">
+                                            {recentTickets.map((t: any) => (
+                                                <div key={t.id} className="text-xs bg-white/50 p-2 rounded border border-red-100">
+                                                    <p className="font-semibold">{t.asunto || 'Sin Asunto'} <span className="opacity-70">({t.fecha_creacion?.split(' ')[0]})</span></p>
+                                                    <p className="line-clamp-2 italic opacity-80">{t.descripcion}</p>
+                                                    <span className={clsx("text-[10px] px-1 rounded", t.estado === 'Abierto' ? "bg-red-200 text-red-900" : "bg-gray-200")}>
+                                                        {t.estado === '1' ? 'Abierto' : 'Cerrado/Resuelto'}
+                                                    </span>
+                                                </div>
+                                            ))}
                                         </div>
-                                    ))}
-                                </div>
-                            )}
-                            {balanceAlert !== null && (
-                                <div className="mt-1 p-2 bg-red-100 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded text-red-700 dark:text-red-400 text-xs flex items-center gap-2 animate-pulse">
-                                    <AlertCircle className="w-4 h-4" />
-                                    <b>Cliente en Mora:</b> Deuda total de ${balanceAlert.toLocaleString()}
-                                </div>
-                            )}
-                        </div>
-                        <div className="space-y-1">
-                            <label className="text-xs font-medium text-muted-foreground">Plan Actual <span className="text-red-500">*</span></label>
-                            <input
-                                {...register('current_plan', { required: true })}
-                                className={clsx(
-                                    "w-full bg-background border rounded-md p-2 text-sm focus:ring-2 focus:ring-primary/50 focus:outline-none",
-                                    errors.current_plan ? "border-red-500 ring-1 ring-red-500" : "border-input"
-                                )}
-                                placeholder="Ej. Hogar 10MB"
-                            />
-                        </div>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-4">
-                        <div className="space-y-1">
-                            <label className="text-xs font-medium text-muted-foreground">Categoría</label>
-                            <select {...register('migration_category')} className="w-full bg-background border border-input rounded-md p-2 text-sm">
-                                <option value="">Seleccionar...</option>
-                                {REPORT_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
-                            </select>
-                        </div>
-                        <div className="space-y-1">
-                            <label className="text-xs font-medium text-muted-foreground flex justify-between">
-                                <span>Duración (min)</span>
-                                {isTimerRunning && <span className="text-green-600 font-mono animate-pulse">{formatTime(timerSeconds)}</span>}
-                            </label>
-                            <div className="flex gap-2 items-center">
-                                <div className="relative flex-1">
-                                    <Clock className={clsx("absolute left-3 top-2.5 w-4 h-4", isManualDuration ? "text-amber-500" : "text-green-600")} />
-                                    <input
-                                        type="number"
-                                        step="0.1"
-                                        {...register('duration_min', {
-                                            onChange: handleManualDurationChange
-                                        })}
-                                        className={clsx(
-                                            "w-full pl-9 bg-background border rounded-md p-2 text-sm transition-colors",
-                                            isManualDuration
-                                                ? "border-amber-300 bg-amber-50 dark:bg-amber-900/10 focus:ring-amber-200"
-                                                : "border-green-300 bg-green-50 dark:bg-green-900/10 focus:ring-green-200"
-                                        )}
-                                    />
-                                </div>
-                                <button
-                                    type="button"
-                                    onClick={toggleTimer}
-                                    className={clsx(
-                                        "p-2 rounded-md text-white transition-all shadow-sm active:scale-95 flex items-center gap-2",
-                                        isTimerRunning ? "bg-red-500 hover:bg-red-600" : "bg-green-600 hover:bg-green-700"
-                                    )}
-                                    title={isTimerRunning ? "Detener Cronómetro" : "Iniciar Cronómetro"}
-                                >
-                                    {isTimerRunning ? <Square className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current" />}
-                                </button>
-                            </div>
-                            {isManualDuration && (
-                                <p className="text-[10px] text-amber-600 flex items-center gap-1">
-                                    <AlertTriangle className="w-3 h-3" /> Editado manualmente (Estimado)
-                                </p>
-                            )}
-                        </div>
-                    </div>
-
-                    <div className="space-y-1 pt-2 border-t border-border">
-                        <label className="text-xs font-medium text-muted-foreground flex items-center gap-2">
-                            <span>📅 Fecha de Gestión (Opcional - Para cargas retroactivas)</span>
-                        </label>
-                        <input
-                            type="datetime-local"
-                            {...register('created_at')}
-                            className="bg-muted/30 border border-input rounded-md p-2 text-sm w-full text-foreground"
-                        />
-                        <p className="text-[10px] text-muted-foreground">Dejar vacío para usar la fecha/hora actual.</p>
-                    </div>
-
-                    {/* RESULTS SECTION */}
-                    <div className="space-y-1">
-                        <label className="text-xs font-medium text-muted-foreground">Resultado</label>
-                        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
-                            {['Aceptó Migración', 'Lo pensará', 'No contesta', 'Rechazó (Mantiene)', 'Rechazó (Cancelación)', 'Equivocado', 'Cuelgan'].map((res) => (
-                                <label
-                                    key={res}
-                                    className={clsx(
-                                        "cursor-pointer text-xs font-medium p-2 rounded-md border text-center transition-all select-none",
-                                        result === res
-                                            ? "bg-primary text-primary-foreground border-primary"
-                                            : "bg-background hover:bg-muted"
-                                    )}
-                                >
-                                    <input
-                                        type="radio"
-                                        value={res}
-                                        {...register('result')}
-                                        className="sr-only"
-                                    />
-                                    {res}
-                                </label>
-                            ))}
-                        </div>
-                    </div>
-
-
-
-                    {/* Sale Section */}
-                    {isSale && (
-                        <div className="p-4 bg-green-500/10 border border-green-500/20 rounded-lg space-y-4 animate-in zoom-in-95">
-                            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                                <div className="space-y-1 md:col-span-2">
-                                    <label className="text-xs font-medium text-green-700 dark:text-green-400">Plan Vendido</label>
-                                    <select
-                                        {...register('suggested_plan')}
-                                        className="w-full bg-background border border-input rounded-md p-2 text-sm"
-                                    >
-                                        <option value="">Selecciona el plan...</option>
-                                        {offeredPlans.length > 0 ? (
-                                            offeredPlans.map(plan => (
-                                                <option key={plan.id} value={plan.name}>
-                                                    {plan.name} - ${Number(plan.price).toLocaleString()}
-                                                </option>
-                                            ))
-                                        ) : (
-                                            PLAN_OPTIONS.map(opt => (
-                                                <option key={opt} value={opt}>{opt}</option>
-                                            ))
-                                        )}
-                                    </select>
-                                </div>
-
-                                {/* ROI / Speed Calculator */}
-                                <div className="space-y-1 md:col-span-4 mt-2 p-3 bg-indigo-50 dark:bg-indigo-900/10 rounded-lg border border-indigo-100 dark:border-indigo-800">
-                                    <label className="text-xs font-bold text-indigo-700 dark:text-indigo-400 flex items-center gap-2">
-                                        🚀 Calculadora de Beneficio (Argumento de Venta)
-                                    </label>
-                                    <div className="text-xs flex flex-wrap gap-4 items-center">
-                                        {(() => {
-                                            const currentPlanObj = currentPlanDetails || wispHubPlans.find(p => p.nombre === watch('current_plan'));
-                                            const newPlanObj = offeredPlans.find(p => p.name === suggestedPlanName);
-
-                                            // Fallback speeds if plan details missing
-                                            const getCurrentSpeed = (p: any) => p?.velocidad_bajada || (p?.nombre?.match(/(\d+)MB/i)?.[1]) || (p?.name?.match(/(\d+)MB/i)?.[1]) || '?';
-
-                                            const currentSpeed = getCurrentSpeed(currentPlanObj);
-                                            const newSpeed = getCurrentSpeed(newPlanObj);
-                                            const diffPrice = watch('price_difference') || 0;
-
-                                            return (
-                                                <>
-                                                    <div className="flex flex-col">
-                                                        <span className="text-muted-foreground">Velocidad Actual:</span>
-                                                        <span className="font-bold">{currentSpeed} Mb</span>
-                                                    </div>
-                                                    <div className="text-muted-foreground">→</div>
-                                                    <div className="flex flex-col">
-                                                        <span className="text-green-600 font-bold">Nueva Velocidad:</span>
-                                                        <span className="font-bold text-green-600">{newSpeed} Mb</span>
-                                                    </div>
-                                                    <div className="h-8 w-px bg-border mx-2"></div>
-                                                    <div>
-                                                        El cliente paga solo <span className="font-bold text-green-600">${diffPrice.toLocaleString()}</span> más
-                                                        por <span className="font-bold text-indigo-600">
-                                                            {Number(newSpeed) && Number(currentSpeed) ? (Number(newSpeed) / Number(currentSpeed)).toFixed(1) + 'x' : 'mejor'} velocidad
-                                                        </span>.
-                                                    </div>
-                                                </>
-                                            );
-                                        })()}
-                                    </div>
-                                </div>
-
-
-                                <div className="space-y-1">
-                                    <label className="text-xs font-medium text-green-700 dark:text-green-400">Upsell ($)</label>
-                                    <div className="relative">
-                                        <DollarSign className="absolute left-3 top-2.5 w-4 h-4 text-green-600" />
-                                        <input
-                                            type="text"
-                                            readOnly
-                                            value={watch('price_difference')
-                                                ? new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(watch('price_difference') || 0)
-                                                : '$ 0'}
-                                            className="w-full pl-9 bg-background border border-input rounded-md p-2 text-sm font-bold text-green-700"
-                                        />
-                                        <input
-                                            type="hidden"
-                                            {...register('price_difference', { valueAsNumber: true })}
-                                        />
-                                    </div>
-                                </div>
-                                <div className="space-y-1">
-                                    <label className="text-xs font-medium text-blue-700 dark:text-blue-400">Costo Día</label>
-                                    <div className="relative">
-                                        <DollarSign className="absolute left-3 top-2.5 w-4 h-4 text-blue-600" />
-                                        <input
-                                            type="text"
-                                            readOnly
-                                            value={watch('price_difference')
-                                                ? new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format((watch('price_difference') || 0) / 30)
-                                                : '$ 0'}
-                                            className="w-full pl-9 bg-background border border-input rounded-md p-2 text-sm font-bold text-blue-700"
-                                        />
                                     </div>
                                 </div>
                             </div>
+                        )}
 
+                        {/* AI Smart Suggestion - Feature 4 */}
+                        {selectedClientId && (
+                            <div className={clsx(
+                                "p-4 rounded-xl border-l-4 animate-in slide-in-from-left-2 duration-500",
+                                recentTickets.some(t => t.asunto?.toLowerCase().includes('lento') || t.asunto?.toLowerCase().includes('intermitencia'))
+                                    ? "bg-amber-50 border-amber-500 text-amber-900"
+                                    : "bg-indigo-50 border-indigo-500 text-indigo-900"
+                            )}>
+                                <div className="flex items-start gap-4">
+                                    <div className={clsx(
+                                        "p-2 rounded-xl",
+                                        recentTickets.some(t => t.asunto?.toLowerCase().includes('lento') || t.asunto?.toLowerCase().includes('intermitencia'))
+                                            ? "bg-amber-500 text-white"
+                                            : "bg-indigo-600 text-white"
+                                    )}>
+                                        <Zap className="w-5 h-5 fill-current" />
+                                    </div>
+                                    <div>
+                                        <h4 className="text-sm font-black uppercase tracking-widest opacity-70 mb-1 leading-none">Sugerencia Inteligente</h4>
+                                        <p className="text-sm font-bold">
+                                            {(() => {
+                                                const issues = recentTickets.filter(t =>
+                                                    t.asunto?.toLowerCase().includes('lento') ||
+                                                    t.asunto?.toLowerCase().includes('intermitencia') ||
+                                                    t.asunto?.toLowerCase().includes('falla')
+                                                );
 
-
-                        </div>
-                    )}
-
-                    {/* Rejection Section */}
-                    {isRejection && (
-                        <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-lg space-y-4 animate-in zoom-in-95">
-                            <div className="space-y-1">
-                                <label className="text-xs font-medium text-red-700 dark:text-red-400">Objeción Principal</label>
-                                <select
-                                    {...register('objection')}
-                                    className="w-full bg-background border border-input rounded-md p-2 text-sm"
-                                >
-                                    <option value="">Selecciona motivo...</option>
-                                    {PREDEFINED_OBJECTIONS.map(obj => (
-                                        <option key={obj} value={obj}>{obj}</option>
-                                    ))}
-                                </select>
+                                                if (issues.length >= 2) {
+                                                    return "Detectada inestabilidad recurrente por historial. Recomendación: Migración prioritaria a Fibra Óptica + Router Dual Band (Plan 100MB+).";
+                                                } else if (watch('current_plan')?.toLowerCase().includes('10mb')) {
+                                                    return "Plan básico detectado. El cliente es ideal para un Upsell agresivo a 100MB por una diferencia mínima.";
+                                                } else if (recentTickets.some(t => t.asunto?.toLowerCase().includes('wifi'))) {
+                                                    return "Reportes de problemas de cobertura WiFi. Sugiere extensor Mesh o un plan con mejor router.";
+                                                }
+                                                return "Sin fallas críticas reportadas. Enfócate en la estabilidad y velocidad superior de la Fibra como principal argumento.";
+                                            })()}
+                                        </p>
+                                    </div>
+                                </div>
                             </div>
+                        )}
 
-                            {/* Scheduling UI for Call Back */}
-                            <div className="space-y-1 pt-2 border-t border-red-200 dark:border-red-800/30">
-                                <label className="text-xs font-bold text-red-700 dark:text-red-400 flex items-center gap-2">
-                                    📅 Agendar Llamada de Seguimiento
-                                </label>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div className="space-y-1 relative">
+                                <label className="text-xs font-medium text-muted-foreground">Cliente / ID <span className="text-red-500">*</span></label>
                                 <div className="flex gap-2">
-                                    <input
-                                        type="datetime-local"
-                                        {...register('scheduled_followup')}
-                                        className="w-full bg-background border border-input rounded-md p-2 text-sm"
-                                    />
-                                </div>
-                                <p className="text-[10px] text-muted-foreground">
-                                    Se te notificará para llamar nuevamente al cliente en esta fecha.
-                                </p>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Tech Support Ticket UI - Shown if Technical Failure OR Technician Required */}
-
-                    {/* Always allow toggling the ticket section via this switch, unless Result is explicitly Tech Failure */}
-                    {!isTechSupport && (
-                        <div className="flex items-center gap-2 pt-2 border-t border-muted/20">
-                            <input
-                                type="checkbox"
-                                id="manual_tech_required"
-                                checked={technicianRequired}
-                                onChange={(e) => setValue('technician_required', e.target.checked)}
-                                className="w-4 h-4 rounded border-gray-300 text-orange-600 focus:ring-orange-500"
-                            />
-                            <label htmlFor="manual_tech_required" className="text-sm font-bold text-orange-600 flex items-center gap-1 cursor-pointer select-none">
-                                <Wrench className="w-4 h-4" /> 🚩 Reportar Falla Técnica / Crear Ticket
-                            </label>
-                        </div>
-                    )}
-
-                    {(isTechSupport || technicianRequired) && (
-                        <div className="p-4 bg-orange-500/10 border border-orange-500/20 rounded-lg space-y-4 animate-in zoom-in-95 mt-2">
-
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                <div className="space-y-1">
-                                    <label className="text-xs font-medium text-orange-700 dark:text-orange-400">
-                                        Asunto <span className="text-red-500">*</span>
-                                    </label>
-                                    <select
-                                        id="ticket_subject"
-                                        className="w-full bg-background border border-input rounded-md p-2 text-sm"
+                                    <div className="relative flex-1">
+                                        <User className="absolute left-3 top-2.5 w-4 h-4 text-muted-foreground" />
+                                        <input
+                                            {...register('client_reference', { required: true })}
+                                            className={clsx(
+                                                "w-full pl-9 bg-background border rounded-md p-2 text-sm focus:ring-2 focus:ring-primary/50 focus:outline-none",
+                                                errors.client_reference ? "border-red-500 ring-1 ring-red-500" : "border-input"
+                                            )}
+                                            placeholder="Buscar por Nombre o Cédula..."
+                                            autoComplete="off"
+                                        />
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={handleSearch}
+                                        disabled={searching}
+                                        className="bg-indigo-600 hover:bg-indigo-700 text-white p-2 rounded-md transition-colors"
+                                        title="Buscar en WispHub"
                                     >
-                                        {TICKET_SUBJECTS.map(subj => (
-                                            <option key={subj} value={subj}>{subj}</option>
+                                        {searching ? <Loader2 className="w-5 h-5 animate-spin" /> : <Search className="w-5 h-5" />}
+                                    </button>
+                                </div>
+                                {/* Results Dropdown ... */}
+                                {showResults && searchResults.length > 0 && (
+                                    <div className="absolute z-50 top-full left-0 right-0 mt-1 bg-card border border-border rounded-md shadow-xl max-h-60 overflow-y-auto">
+                                        <div className="p-2 border-b border-border flex justify-between items-center bg-muted/30">
+                                            <span className="text-xs font-bold text-muted-foreground">Resultados WispHub</span>
+                                            <button type="button" onClick={() => setShowResults(false)} className="text-xs text-red-500 hover:underline">Cerrar</button>
+                                        </div>
+                                        {searchResults.map(client => (
+                                            <div
+                                                key={client.id_servicio}
+                                                onClick={() => selectClient(client)}
+                                                className="p-3 hover:bg-muted/50 cursor-pointer border-b border-border/50 last:border-0 transition-colors"
+                                            >
+                                                <p className="font-bold text-sm text-foreground">{client.nombre}</p>
+                                                <div className="flex justify-between text-xs text-muted-foreground mt-1">
+                                                    <span>CC: {client.cedula}</span>
+                                                    <span className={clsx(
+                                                        "px-1.5 py-0.5 rounded text-[10px]",
+                                                        client.estado === 'Activo' ? 'bg-green-500/20 text-green-600' : 'bg-red-500/20 text-red-600'
+                                                    )}>{client.estado}</span>
+                                                </div>
+                                                <p className="text-xs text-indigo-500 mt-0.5">{client.plan_internet?.nombre || 'Sin Plan'}</p>
+                                            </div>
                                         ))}
-                                    </select>
-                                </div>
-                                <div className="space-y-1">
-                                    <label className="text-xs font-medium text-orange-700 dark:text-orange-400">
-                                        Técnico Responsable <span className="text-red-500">*</span>
-                                    </label>
-                                    <select
-                                        id="ticket_technician"
-                                        className="w-full bg-background border border-input rounded-md p-2 text-sm"
-                                    >
-                                        <option value="">Seleccionar técnico...</option>
-                                        {technicians.length > 0 ? (
-                                            technicians.map(tech => (
-                                                <option key={tech.id || tech.usuario} value={tech.id}>
-                                                    {tech.nombre}
-                                                </option>
-                                            ))
-                                        ) : (
-                                            <>
-                                                {/* Fallback IDs (Usernames with Domain) matching wisphub.ts */}
-                                                <option value="tecnico4@rapilink-sas">TOMAS MCAUSLAND</option>
-                                                <option value="tecnico3@rapilink-sas">MARIO SABANAGRANDE</option>
-                                                <option value="asistente.administrativa1@rapilink-sas">VALENTINA SUAREZ</option>
-                                                <option value="asistente.administrativa2@rapilink-sas">ELENA MACHADO</option>
-                                                <option value="lucia@rapilink-sas">LUCIA ACUÑA</option>
-                                                <option value="cristobal@rapilink-sas">CRISTOBAL MARTINEZ</option>
-                                                <option value="javier@rapilink-sas">JAVIER OLIVERA</option>
-                                                <option value="vanessa@rapilink-sas">Vanessa Barrera</option>
-                                            </>
+                                    </div>
+                                )}
+                                {balanceAlert !== null && (
+                                    <div className="mt-1 p-2 bg-red-100 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded text-red-700 dark:text-red-400 text-xs flex flex-col gap-2 animate-pulse">
+                                        <div className="flex items-center gap-2">
+                                            <AlertCircle className="w-4 h-4" />
+                                            <b>Cliente en Mora:</b> Deuda total de ${balanceAlert.toLocaleString()}
+                                        </div>
+                                        {portalLink && (
+                                            <a
+                                                href={portalLink}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="bg-red-600 hover:bg-red-700 text-white px-3 py-1.5 rounded text-[10px] font-black flex items-center justify-center gap-1.5 transition-colors mt-1 w-fit"
+                                            >
+                                                <ExternalLink className="w-3 h-3" /> VER FACTURAS EN PORTAL
+                                            </a>
                                         )}
-                                    </select>
-
-                                </div>
+                                    </div>
+                                )}
                             </div>
-
                             <div className="space-y-1">
-                                <label className="text-xs font-medium text-orange-700 dark:text-orange-400">
-                                    Descripción <span className="text-red-500">*</span>
-                                </label>
-                                <textarea
-                                    id="ticket_description"
-                                    className="w-full bg-background border border-input rounded-md p-2 text-sm min-h-[100px]"
-                                    placeholder="Describe el problema, pruebas realizadas, síntomas, etc..."
+                                <label className="text-xs font-medium text-muted-foreground">Plan Actual <span className="text-red-500">*</span></label>
+                                <input
+                                    {...register('current_plan', { required: true })}
+                                    className={clsx(
+                                        "w-full bg-background border rounded-md p-2 text-sm focus:ring-2 focus:ring-primary/50 focus:outline-none",
+                                        errors.current_plan ? "border-red-500 ring-1 ring-red-500" : "border-input"
+                                    )}
+                                    placeholder="Ej. Hogar 10MB"
                                 />
                             </div>
+                        </div>
 
-                            <div className="grid grid-cols-2 gap-4">
-                                <div className="space-y-1">
-                                    <label className="text-xs font-medium text-orange-700 dark:text-orange-400">Prioridad</label>
-                                    <select
-                                        id="ticket_priority"
-                                        className="w-full bg-background border border-input rounded-md p-2 text-sm"
+                        <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                            <div className="space-y-1">
+                                <label className="text-xs font-medium text-muted-foreground flex items-center gap-1">
+                                    <Phone className="w-3 h-3 text-indigo-500" /> Celular
+                                </label>
+                                <input
+                                    type="text"
+                                    value={fullClientData?.telefono || fullClientData?.telefono1 || ''}
+                                    placeholder="---"
+                                    readOnly
+                                    className="w-full bg-muted/30 border border-input rounded-md p-2 text-sm text-foreground font-medium cursor-default"
+                                />
+                            </div>
+                            <div className="space-y-1">
+                                <label className="text-xs font-medium text-muted-foreground flex items-center gap-1">
+                                    <Activity className="w-3 h-3 text-indigo-500" /> IP del Servicio
+                                </label>
+                                <input
+                                    type="text"
+                                    value={fullClientData?.ip || ''}
+                                    placeholder="---"
+                                    readOnly
+                                    className="w-full bg-muted/30 border border-input rounded-md p-2 text-sm text-foreground font-medium cursor-default"
+                                />
+                            </div>
+                            <div className="space-y-1">
+                                <label className="text-xs font-medium text-muted-foreground flex items-center gap-1">
+                                    <DollarSign className="w-3 h-3 text-indigo-500" /> Saldo Pendiente
+                                </label>
+                                <input
+                                    type="text"
+                                    value={balanceAlert !== null ? `$${balanceAlert.toLocaleString()}` : '$0'}
+                                    readOnly
+                                    className={clsx(
+                                        "w-full border rounded-md p-2 text-sm font-black cursor-default",
+                                        (balanceAlert || 0) > 0
+                                            ? "bg-red-50 border-red-200 text-red-700 dark:bg-red-900/20 dark:border-red-800"
+                                            : "bg-muted/30 border-input text-foreground"
+                                    )}
+                                />
+                            </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-4">
+                            <div className="space-y-1">
+                                <label className="text-xs font-medium text-muted-foreground">Categoría</label>
+                                <select {...register('migration_category')} className="w-full bg-background border border-input rounded-md p-2 text-sm">
+                                    <option value="">Seleccionar...</option>
+                                    {REPORT_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+                                </select>
+                            </div>
+                            <div className="space-y-1">
+                                <label className="text-xs font-medium text-muted-foreground flex justify-between">
+                                    <span>Duración (min)</span>
+                                    {isTimerRunning && <span className="text-green-600 font-mono animate-pulse">{formatTime(timerSeconds)}</span>}
+                                </label>
+                                <div className="flex gap-2 items-center">
+                                    <div className="relative flex-1">
+                                        <Clock className={clsx("absolute left-3 top-2.5 w-4 h-4", isManualDuration ? "text-amber-500" : "text-green-600")} />
+                                        <input
+                                            type="number"
+                                            step="0.1"
+                                            {...register('duration_min', {
+                                                onChange: handleManualDurationChange
+                                            })}
+                                            className={clsx(
+                                                "w-full pl-9 bg-background border rounded-md p-2 text-sm transition-colors",
+                                                isManualDuration
+                                                    ? "border-amber-300 bg-amber-50 dark:bg-amber-900/10 focus:ring-amber-200"
+                                                    : "border-green-300 bg-green-50 dark:bg-green-900/10 focus:ring-green-200"
+                                            )}
+                                        />
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={toggleTimer}
+                                        className={clsx(
+                                            "p-2 rounded-md text-white transition-all shadow-sm active:scale-95 flex items-center gap-2",
+                                            isTimerRunning ? "bg-red-500 hover:bg-red-600" : "bg-green-600 hover:bg-green-700"
+                                        )}
+                                        title={isTimerRunning ? "Detener Cronómetro" : "Iniciar Cronómetro"}
                                     >
-                                        <option value="1">Baja</option>
-                                        <option value="2" defaultValue="2">Normal</option>
-                                        <option value="3">Alta</option>
-                                        <option value="4">Muy Alta</option>
-                                    </select>
-                                </div>
-                                <div className="space-y-1">
-                                    <label className="text-xs font-medium text-muted-foreground">Estado</label>
-                                    <input
-                                        type="text"
-                                        value="Nuevo"
-                                        disabled
-                                        className="w-full bg-muted border border-input rounded-md p-2 text-sm text-muted-foreground cursor-not-allowed"
-                                    />
+                                        {isTimerRunning ? <Square className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current" />}
+                                    </button>
                                 </div>
                             </div>
+                        </div>
 
-                            {!selectedClientId && (
-                                <div className="text-xs text-red-500 font-bold bg-red-100 dark:bg-red-900/20 p-2 rounded flex items-center gap-2">
-                                    <AlertCircle className="w-4 h-4" /> Debes buscar y seleccionar un cliente arriba para poder crear el ticket.
+                        <div className="space-y-1">
+                            <label className="text-xs font-medium text-muted-foreground">Observaciones Generales</label>
+                            <textarea
+                                id="interaction_description"
+                                className="w-full bg-background border border-input rounded-md p-2 text-sm min-h-[80px]"
+                                placeholder="Anota aquí los detalles de la conversación..."
+                            />
+                        </div>
+
+                        <div className="space-y-1 pt-2 border-t border-border">
+                            <label className="text-xs font-medium text-muted-foreground flex items-center gap-2">
+                                <span>📅 Fecha de Gestión (Opcional - Para cargas retroactivas)</span>
+                            </label>
+                            <input
+                                type="datetime-local"
+                                {...register('created_at')}
+                                className="bg-muted/30 border border-input rounded-md p-2 text-sm w-full text-foreground"
+                            />
+                            <p className="text-[10px] text-muted-foreground">Dejar vacío para usar la fecha/hora actual.</p>
+                        </div>
+
+                        {/* RESULTS SECTION */}
+                        <div className="space-y-1">
+                            <label className="text-xs font-medium text-muted-foreground">Resultado</label>
+                            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
+                                {['Aceptó Migración', 'Lo pensará', 'No contesta', 'Rechazó (Mantiene)', 'Rechazó (Cancelación)', 'Equivocado', 'Cuelgan', 'Falla Técnica'].map((res) => (
+                                    <label
+                                        key={res}
+                                        className={clsx(
+                                            "cursor-pointer text-xs font-medium p-2 rounded-md border text-center transition-all select-none",
+                                            result === res
+                                                ? "bg-primary text-primary-foreground border-primary"
+                                                : "bg-background hover:bg-muted"
+                                        )}
+                                    >
+                                        <input
+                                            type="radio"
+                                            value={res}
+                                            {...register('result')}
+                                            className="sr-only"
+                                        />
+                                        {res}
+                                    </label>
+                                ))}
+                            </div>
+                        </div>
+
+
+
+                        {/* Sale Section */}
+                        {isSale && (
+                            <div className="p-4 bg-green-500/10 border border-green-500/20 rounded-lg space-y-4 animate-in zoom-in-95">
+                                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                                    <div className="space-y-1 md:col-span-2">
+                                        <label className="text-xs font-medium text-green-700 dark:text-green-400">Plan Vendido</label>
+                                        <select
+                                            {...register('suggested_plan')}
+                                            className="w-full bg-background border border-input rounded-md p-2 text-sm"
+                                        >
+                                            <option value="">Selecciona el plan...</option>
+                                            {offeredPlans.length > 0 ? (
+                                                offeredPlans.map(plan => (
+                                                    <option key={plan.id} value={plan.name}>
+                                                        {plan.name} - ${Number(plan.price).toLocaleString()}
+                                                    </option>
+                                                ))
+                                            ) : (
+                                                PLAN_OPTIONS.map(opt => (
+                                                    <option key={opt} value={opt}>{opt}</option>
+                                                ))
+                                            )}
+                                        </select>
+                                    </div>
+
+                                    {/* ROI / Speed Calculator */}
+                                    <div className="space-y-1 md:col-span-4 mt-2 p-3 bg-indigo-50 dark:bg-indigo-900/10 rounded-lg border border-indigo-100 dark:border-indigo-800">
+                                        <label className="text-xs font-bold text-indigo-700 dark:text-indigo-400 flex items-center gap-2">
+                                            🚀 Calculadora de Beneficio (Argumento de Venta)
+                                        </label>
+                                        <div className="text-xs flex flex-wrap gap-4 items-center">
+                                            {(() => {
+                                                const currentPlanObj = currentPlanDetails || wispHubPlans.find(p => p.nombre === watch('current_plan'));
+                                                const newPlanObj = offeredPlans.find(p => p.name === suggestedPlanName);
+
+                                                // Robust Speed Extraction
+                                                const getCurrentSpeed = (p: any) => {
+                                                    if (!p) return '?';
+                                                    const str = typeof p === 'string' ? p : (p.velocidad_bajada || p.nombre || p.name || '');
+                                                    // Matches: 100MB, 100 MB, 100Mb, 100 Mb, 100Megas, 100M
+                                                    const match = String(str).match(/(\d+)\s*(?:MB|MH|M|MEGAS|megas|kb)/i);
+                                                    return match ? match[1] : (typeof p === 'object' && p.velocidad_bajada ? p.velocidad_bajada : '?');
+                                                };
+
+                                                const currentPlanName = watch('current_plan');
+                                                const currentSpeed = getCurrentSpeed(currentPlanObj || currentPlanName);
+                                                const newSpeed = getCurrentSpeed(newPlanObj || suggestedPlanName);
+                                                const diffPrice = watch('price_difference') || 0;
+
+                                                return (
+                                                    <>
+                                                        <div className="flex flex-col">
+                                                            <span className="text-muted-foreground">Velocidad Actual:</span>
+                                                            <span className="font-bold">{currentSpeed} Mb</span>
+                                                        </div>
+                                                        <div className="text-muted-foreground">→</div>
+                                                        <div className="flex flex-col">
+                                                            <span className="text-green-600 font-bold">Nueva Velocidad:</span>
+                                                            <span className="font-bold text-green-600">{newSpeed} Mb</span>
+                                                        </div>
+                                                        <div className="h-8 w-px bg-border mx-2"></div>
+                                                        <div>
+                                                            El cliente paga solo <span className="font-bold text-green-600">${diffPrice.toLocaleString()}</span> más
+                                                            por <span className="font-bold text-indigo-600">
+                                                                {Number(newSpeed) && Number(currentSpeed) ? (Number(newSpeed) / Number(currentSpeed)).toFixed(1) + 'x' : 'mejor'} velocidad
+                                                            </span>.
+                                                        </div>
+                                                    </>
+                                                );
+                                            })()}
+                                        </div>
+                                    </div>
+
+
+                                    <div className="space-y-1">
+                                        <label className="text-xs font-medium text-green-700 dark:text-green-400">Upsell ($)</label>
+                                        <div className="relative">
+                                            <DollarSign className="absolute left-3 top-2.5 w-4 h-4 text-green-600" />
+                                            <input
+                                                type="text"
+                                                readOnly
+                                                value={watch('price_difference')
+                                                    ? new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(watch('price_difference') || 0).replace('$', '').trim()
+                                                    : '0'}
+                                                className="w-full pl-9 bg-background border border-input rounded-md p-2 text-sm font-bold text-green-700"
+                                            />
+                                            <input
+                                                type="hidden"
+                                                {...register('price_difference', { valueAsNumber: true })}
+                                            />
+                                        </div>
+                                    </div>
+                                    <div className="space-y-1">
+                                        <label className="text-xs font-medium text-blue-700 dark:text-blue-400">Costo Día</label>
+                                        <div className="relative">
+                                            <DollarSign className="absolute left-3 top-2.5 w-4 h-4 text-blue-600" />
+                                            <input
+                                                type="text"
+                                                readOnly
+                                                value={watch('price_difference')
+                                                    ? new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format((watch('price_difference') || 0) / 30).replace('$', '').trim()
+                                                    : '0'}
+                                                className="w-full pl-9 bg-background border border-input rounded-md p-2 text-sm font-bold text-blue-700"
+                                            />
+                                        </div>
+                                    </div>
+                                </div>
+
+
+
+                            </div>
+                        )}
+
+                        {/* Rejection Section */}
+                        {isRejection && (
+                            <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-lg space-y-4 animate-in zoom-in-95">
+                                <div className="space-y-1">
+                                    <label className="text-xs font-medium text-red-700 dark:text-red-400">Objeción Principal</label>
+                                    <select
+                                        {...register('objection')}
+                                        className="w-full bg-background border border-input rounded-md p-2 text-sm"
+                                    >
+                                        <option value="">Selecciona motivo...</option>
+                                        {PREDEFINED_OBJECTIONS.map(obj => (
+                                            <option key={obj} value={obj}>{obj}</option>
+                                        ))}
+                                    </select>
+                                </div>
+
+                                {/* Scheduling UI for Call Back */}
+                                <div className="space-y-1 pt-2 border-t border-red-200 dark:border-red-800/30">
+                                    <label className="text-xs font-bold text-red-700 dark:text-red-400 flex items-center gap-2">
+                                        📅 Agendar Llamada de Seguimiento
+                                    </label>
+                                    <div className="flex gap-2">
+                                        <input
+                                            type="datetime-local"
+                                            {...register('scheduled_followup')}
+                                            className="w-full bg-background border border-input rounded-md p-2 text-sm"
+                                        />
+                                    </div>
+                                    <p className="text-[10px] text-muted-foreground">
+                                        Se te notificará para llamar nuevamente al cliente en esta fecha.
+                                    </p>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Tech Support Ticket UI - Shown if Technical Failure OR Technician Required */}
+
+                        {/* Always allow toggling the ticket section via this switch, unless Result is explicitly Tech Failure */}
+                        {!isTechSupport && (
+                            <div className="flex items-center gap-2 pt-2 border-t border-muted/20">
+                                <input
+                                    type="checkbox"
+                                    id="manual_tech_required"
+                                    checked={technicianRequired}
+                                    onChange={(e) => setValue('technician_required', e.target.checked)}
+                                    className="w-4 h-4 rounded border-gray-300 text-orange-600 focus:ring-orange-500"
+                                />
+                                <label htmlFor="manual_tech_required" className="text-sm font-bold text-orange-600 flex items-center gap-1 cursor-pointer select-none">
+                                    <Wrench className="w-4 h-4" /> 🚩 Reportar Falla Técnica / Crear Ticket
+                                </label>
+                            </div>
+                        )}
+
+                        {(isTechSupport || technicianRequired) && (
+                            <div className="p-4 bg-orange-500/10 border border-orange-500/20 rounded-lg space-y-4 animate-in zoom-in-95 mt-2">
+
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div className="space-y-1">
+                                        <label className="text-xs font-medium text-orange-700 dark:text-orange-400">
+                                            Asunto <span className="text-red-500">*</span>
+                                        </label>
+                                        <select
+                                            id="ticket_subject"
+                                            className="w-full bg-background border border-input rounded-md p-2 text-sm"
+                                        >
+                                            {TICKET_SUBJECTS.map(subj => (
+                                                <option key={subj} value={subj}>{subj}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                    <div className="space-y-1">
+                                        <label className="text-xs font-medium text-orange-700 dark:text-orange-400">
+                                            Técnico Responsable <span className="text-red-500">*</span>
+                                        </label>
+                                        <select
+                                            id="ticket_technician"
+                                            className="w-full bg-background border border-input rounded-md p-2 text-sm"
+                                        >
+                                            <option value="">Seleccionar técnico...</option>
+                                            {technicians.length > 0 ? (
+                                                technicians.map(tech => (
+                                                    <option key={tech.id || tech.usuario} value={tech.id}>
+                                                        {tech.nombre}
+                                                    </option>
+                                                ))
+                                            ) : (
+                                                <>
+                                                    {/* Fallback IDs (Numeric IDs for WispHub) */}
+                                                    <option value="1425368">TOMAS MCAUSLAND</option>
+                                                    <option value="1420238">JAVIER OLIVERA</option>
+                                                    <option value="1425017">ELENA PEREZ</option>
+                                                    <option value="1408762">ADMINISTRACIÓN</option>
+                                                </>
+                                            )}
+                                        </select>
+
+                                    </div>
+                                </div>
+
+                                <div className="space-y-1">
+                                    <label className="text-xs font-medium text-orange-700 dark:text-orange-400">
+                                        Descripción <span className="text-red-500">*</span>
+                                    </label>
+                                    <textarea
+                                        id="ticket_description"
+                                        className="w-full bg-background border border-input rounded-md p-2 text-sm min-h-[100px]"
+                                        placeholder="Describe el problema, pruebas realizadas, síntomas, etc..."
+                                    />
+                                </div>
+
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div className="space-y-1">
+                                        <label className="text-xs font-medium text-orange-700 dark:text-orange-400">Prioridad</label>
+                                        <select
+                                            id="ticket_priority"
+                                            className="w-full bg-background border border-input rounded-md p-2 text-sm"
+                                        >
+                                            <option value="1">Baja</option>
+                                            <option value="2" defaultValue="2">Normal</option>
+                                            <option value="3">Alta</option>
+                                            <option value="4">Muy Alta</option>
+                                        </select>
+                                    </div>
+                                    <div className="space-y-1">
+                                        <label className="text-xs font-medium text-muted-foreground">Estado</label>
+                                        <input
+                                            type="text"
+                                            value="Nuevo"
+                                            disabled
+                                            className="w-full bg-muted border border-input rounded-md p-2 text-sm text-muted-foreground cursor-not-allowed"
+                                        />
+                                    </div>
+                                </div>
+
+                                {!selectedClientId && (
+                                    <div className="text-xs text-red-500 font-bold bg-red-100 dark:bg-red-900/20 p-2 rounded flex items-center gap-2">
+                                        <AlertCircle className="w-4 h-4" /> Debes buscar y seleccionar un cliente arriba para poder crear el ticket.
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        <div className="space-y-2 pt-2 border-t border-border">
+                            <label className="text-xs font-medium text-muted-foreground">¿Del 0 al 10, qué tan probable es que nos recomiende? (NPS)</label>
+                            <div className="flex justify-between gap-1">
+                                {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((val) => (
+                                    <label key={val} className="flex flex-col items-center cursor-pointer group">
+                                        <input
+                                            type="radio"
+                                            value={val}
+                                            {...register('nps', { valueAsNumber: true })}
+                                            className="sr-only peer"
+                                        />
+                                        <div className={clsx(
+                                            "w-8 h-8 flex items-center justify-center rounded-full text-xs font-medium border transition-all peer-checked:scale-110",
+                                            "peer-focus:ring-2 peer-focus:ring-offset-2 peer-focus:ring-indigo-500",
+                                            val <= 6 ? "peer-checked:bg-red-500 peer-checked:text-white border-red-200 hover:border-red-500" :
+                                                val <= 8 ? "peer-checked:bg-yellow-500 peer-checked:text-white border-yellow-200 hover:border-yellow-500" :
+                                                    "peer-checked:bg-green-500 peer-checked:text-white border-green-200 hover:border-green-500"
+                                        )}>
+                                            {val}
+                                        </div>
+                                    </label>
+                                ))}
+                            </div>
+                        </div>
+
+                        <div className="space-y-2 pt-2 border-t border-border">
+                            <div className="flex items-center gap-2">
+                                <input
+                                    type="checkbox"
+                                    id="special_case"
+                                    {...register('is_special_case')}
+                                    className="w-4 h-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                                />
+                                <label htmlFor="special_case" className="text-sm font-medium text-indigo-600 flex items-center gap-1 cursor-pointer">
+                                    <AlertCircle className="w-4 h-4" /> Marcar como Caso Especial
+                                </label>
+                            </div>
+
+                            {isSpecialCase && (
+                                <div className="p-4 bg-indigo-500/5 border border-indigo-500/20 rounded-lg space-y-3 animate-in fade-in slide-in-from-top-2">
+                                    <div className="space-y-1">
+                                        <label className="text-xs font-medium text-indigo-700 dark:text-indigo-400">Descripción del Caso</label>
+                                        <textarea
+                                            {...register('special_case_description')}
+                                            className="w-full bg-background border border-input rounded-md p-2 text-sm min-h-[60px]"
+                                            placeholder="Detalles de la incidencia..."
+                                        />
+                                    </div>
+                                    <div className="space-y-1">
+                                        <label className="text-xs font-medium text-indigo-700 dark:text-indigo-400">ID Servicio / Teléfono</label>
+                                        <input
+                                            {...register('special_case_number')}
+                                            className="w-full bg-background border border-input rounded-md p-2 text-sm"
+                                            placeholder="Ej. 102030 / 3001234567"
+                                        />
+                                    </div>
                                 </div>
                             )}
                         </div>
-                    )}
 
-                    <div className="space-y-2 pt-2 border-t border-border">
-                        <label className="text-xs font-medium text-muted-foreground">¿Del 0 al 10, qué tan probable es que nos recomiende? (NPS)</label>
-                        <div className="flex justify-between gap-1">
-                            {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((val) => (
-                                <label key={val} className="flex flex-col items-center cursor-pointer group">
-                                    <input
-                                        type="radio"
-                                        value={val}
-                                        {...register('nps', { valueAsNumber: true })}
-                                        className="sr-only peer"
-                                    />
-                                    <div className={clsx(
-                                        "w-8 h-8 flex items-center justify-center rounded-full text-xs font-medium border transition-all peer-checked:scale-110",
-                                        "peer-focus:ring-2 peer-focus:ring-offset-2 peer-focus:ring-indigo-500",
-                                        val <= 6 ? "peer-checked:bg-red-500 peer-checked:text-white border-red-200 hover:border-red-500" :
-                                            val <= 8 ? "peer-checked:bg-yellow-500 peer-checked:text-white border-yellow-200 hover:border-yellow-500" :
-                                                "peer-checked:bg-green-500 peer-checked:text-white border-green-200 hover:border-green-500"
-                                    )}>
-                                        {val}
+                        <button
+                            type="submit"
+                            disabled={saving}
+                            className={clsx(
+                                "w-full flex items-center justify-center gap-2 py-3 rounded-lg font-bold transition-all disabled:opacity-50 mt-4",
+                                initialValues?.id ? "bg-amber-600 hover:bg-amber-700 text-white" : "bg-primary text-primary-foreground hover:bg-primary/90"
+                            )}
+                        >
+                            <Save className="w-4 h-4" />
+                            {saving ? 'Guardando...' : (initialValues?.id ? 'Actualizar Gestión' : 'Guardar Gestión')}
+                        </button>
+                    </form >
+                </div >
+
+                <div className="hidden lg:block lg:col-span-1">
+                    <div className="sticky top-6 h-[calc(100vh-100px)] flex flex-col gap-4">
+                        {/* Sidebar Tabs */}
+                        <div className="flex p-1 bg-muted rounded-lg w-full">
+                            <button
+                                type="button"
+                                onClick={() => setActiveTab('scripts')}
+                                className={clsx(
+                                    "flex-1 flex items-center justify-center gap-2 py-2 rounded-md text-xs font-bold transition-all",
+                                    activeTab === 'scripts' ? "bg-background text-primary shadow-sm" : "hover:bg-background/50 text-muted-foreground"
+                                )}
+                            >
+                                <BookOpen className="w-4 h-4" /> Guiones
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setActiveTab('tickets')}
+                                className={clsx(
+                                    "flex-1 flex items-center justify-center gap-2 py-2 rounded-md text-xs font-bold transition-all p-relative",
+                                    activeTab === 'tickets' ? "bg-background text-primary shadow-sm" : "hover:bg-background/50 text-muted-foreground"
+                                )}
+                            >
+                                <Wrench className="w-4 h-4" /> Historial
+                                {recentTickets.length > 0 && (
+                                    <span className="absolute -top-1 -right-1 w-2 h-2 bg-blue-500 rounded-full"></span>
+                                )}
+                            </button>
+                        </div>
+
+                        <div className="flex-1 overflow-y-auto pb-20">
+                            {activeTab === 'scripts' ? (
+                                <ScriptViewer category={category || ''} objection={currentObjection || null} />
+                            ) : activeTab === 'tickets' ? (
+                                <div className="space-y-4">
+                                    {/* Pending CRM Follow-ups */}
+                                    {pendingFollowups.length > 0 && (
+                                        <div className="bg-amber-50 p-4 rounded-xl border border-amber-200 shadow-sm space-y-3">
+                                            <h4 className="text-sm font-bold flex items-center gap-2 text-amber-700">
+                                                <Clock className="w-4 h-4" /> Seguimientos Hoy
+                                            </h4>
+                                            <div className="space-y-2">
+                                                {pendingFollowups.map((f) => (
+                                                    <div key={f.id} className="p-2 bg-white rounded border border-amber-100 text-xs">
+                                                        <p className="font-bold text-slate-800">{f.client_reference}</p>
+                                                        <p className="text-[10px] text-amber-600 font-medium">
+                                                            {new Date(f.scheduled_followup).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                                        </p>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* WispHub Tickets */}
+                                    <div className="bg-card p-4 rounded-xl border border-border shadow-sm space-y-4">
+                                        <h4 className="text-sm font-bold flex items-center gap-2 border-b border-border pb-2">
+                                            <Clock className="w-4 h-4 text-blue-500" /> Tickets de WispHub
+                                        </h4>
+
+                                        {loadingTickets ? (
+                                            <div className="py-12 text-center space-y-3">
+                                                <Loader2 className="w-8 h-8 animate-spin mx-auto text-primary" />
+                                                <p className="text-xs text-muted-foreground animate-pulse font-bold">Buscando historial en WispHub...</p>
+                                            </div>
+                                        ) : recentTickets.length === 0 ? (
+                                            <div className="py-8 text-center space-y-2 opacity-50">
+                                                <AlertCircle className="w-8 h-8 mx-auto text-muted-foreground" />
+                                                <p className="text-xs">No hay tickets registrados para este cliente.</p>
+                                            </div>
+                                        ) : (
+                                            <div className="space-y-3">
+                                                {recentTickets.map((ticket, idx) => (
+                                                    <div
+                                                        key={ticket.id || idx}
+                                                        className="p-3 bg-muted/30 rounded-lg border border-border/50 hover:border-blue-500/30 transition-colors"
+                                                    >
+                                                        <div className="flex justify-between items-start mb-1">
+                                                            <span className={clsx(
+                                                                "text-[10px] px-1.5 py-0.5 rounded font-bold uppercase",
+                                                                ticket.id_estado === 3 ? "bg-green-100 text-green-700" :
+                                                                    ticket.id_estado === 2 ? "bg-orange-100 text-orange-700" :
+                                                                        "bg-blue-100 text-blue-700"
+                                                            )}>
+                                                                {ticket.nombre_estado}
+                                                            </span>
+                                                            <div className="flex items-center gap-1.5">
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => refreshSpecificTicket(ticket.id)}
+                                                                    className="p-1 hover:bg-white/50 rounded transition-colors text-muted-foreground hover:text-primary"
+                                                                    title="Refrescar estado"
+                                                                >
+                                                                    <RefreshCw className="w-3 h-3" />
+                                                                </button>
+                                                                <span className="text-[10px] text-muted-foreground">
+                                                                    #{ticket.id}
+                                                                </span>
+                                                            </div>
+                                                        </div>
+                                                        <p className="text-xs font-bold leading-tight mb-2">{ticket.asunto}</p>
+                                                        <div className="grid grid-cols-2 gap-2 text-[10px]">
+                                                            <div className="flex flex-col">
+                                                                <span className="text-muted-foreground">Técnico:</span>
+                                                                <span className="truncate">{ticket.nombre_tecnico}</span>
+                                                            </div>
+                                                            <div className="flex flex-col text-right">
+                                                                <span className="text-muted-foreground">Fecha:</span>
+                                                                <span>{new Date(ticket.fecha_creacion).toLocaleDateString()}</span>
+                                                            </div>
+                                                        </div>
+                                                        {ticket.id_estado !== 3 && (
+                                                            <div className={clsx(
+                                                                "mt-2 text-[9px] font-bold flex items-center gap-1",
+                                                                ticket.sla_status === 'critico' ? "text-red-500" :
+                                                                    ticket.sla_status === 'amarillo' ? "text-amber-500" :
+                                                                        "text-green-600"
+                                                            )}>
+                                                                <Clock className="w-3 h-3" /> Abierto hace {ticket.horas_abierto}h
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
                                     </div>
-                                </label>
-                            ))}
+                                </div>
+                            ) : null}
                         </div>
                     </div>
-
-                    <div className="space-y-2 pt-2 border-t border-border">
-                        <div className="flex items-center gap-2">
-                            <input
-                                type="checkbox"
-                                id="special_case"
-                                {...register('is_special_case')}
-                                className="w-4 h-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
-                            />
-                            <label htmlFor="special_case" className="text-sm font-medium text-indigo-600 flex items-center gap-1 cursor-pointer">
-                                <AlertCircle className="w-4 h-4" /> Marcar como Caso Especial
-                            </label>
-                        </div>
-
-                        {isSpecialCase && (
-                            <div className="p-4 bg-indigo-500/5 border border-indigo-500/20 rounded-lg space-y-3 animate-in fade-in slide-in-from-top-2">
-                                <div className="space-y-1">
-                                    <label className="text-xs font-medium text-indigo-700 dark:text-indigo-400">Descripción del Caso</label>
-                                    <textarea
-                                        {...register('special_case_description')}
-                                        className="w-full bg-background border border-input rounded-md p-2 text-sm min-h-[60px]"
-                                        placeholder="Detalles de la incidencia..."
-                                    />
-                                </div>
-                                <div className="space-y-1">
-                                    <label className="text-xs font-medium text-indigo-700 dark:text-indigo-400">ID Servicio / Teléfono</label>
-                                    <input
-                                        {...register('special_case_number')}
-                                        className="w-full bg-background border border-input rounded-md p-2 text-sm"
-                                        placeholder="Ej. 102030 / 3001234567"
-                                    />
-                                </div>
-                            </div>
-                        )}
-                    </div>
-
-                    <button
-                        type="submit"
-                        disabled={saving}
-                        className={clsx(
-                            "w-full flex items-center justify-center gap-2 py-3 rounded-lg font-bold transition-all disabled:opacity-50 mt-4",
-                            initialValues?.id ? "bg-amber-600 hover:bg-amber-700 text-white" : "bg-primary text-primary-foreground hover:bg-primary/90"
-                        )}
-                    >
-                        <Save className="w-4 h-4" />
-                        {saving ? 'Guardando...' : (initialValues?.id ? 'Actualizar Gestión' : 'Guardar Gestión')}
-                    </button>
-                </form >
-            </div >
-
-            <div className="hidden lg:block lg:col-span-1">
-                <div className="sticky top-6 h-[calc(100vh-100px)] overflow-hidden">
-                    <ScriptViewer category={category || ''} objection={currentObjection || null} />
                 </div>
             </div>
-        </div >
+        </div>
     );
 }

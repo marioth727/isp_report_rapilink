@@ -11,27 +11,15 @@ import { InteractionHistory } from './pages/InteractionHistory';
 import { DailyReportGenerator } from './pages/DailyReportGenerator';
 import { Configuration } from './pages/Configuration';
 import { CampaignManager } from './pages/CampaignManager';
+import { OperativeDashboard } from './pages/OperativeDashboard';
+import { OperationsDashboard } from './pages/OperationsDashboard';
+import { TechnicianAnalytics } from './pages/TechnicianAnalytics';
+import { OperationsHub } from './pages/OperationsHub';
+import { OperationsProductivity } from './pages/OperationsProductivity';
+import { OperationsMyTasks } from './pages/OperationsMyTasks';
+import { OperationsSupervision } from './pages/OperationsSupervision';
 import { Pipeline } from './pages/Pipeline';
 
-const AdminRoute = ({ children }: { children: React.ReactNode }) => {
-  const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
-
-  useEffect(() => {
-    checkAdmin();
-  }, []);
-
-  const checkAdmin = async () => {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (user && user.user_metadata?.role === 'admin') {
-      setIsAdmin(true);
-    } else {
-      setIsAdmin(false);
-    }
-  };
-
-  if (isAdmin === null) return <div>Verificando permisos...</div>;
-  return isAdmin ? children : <Navigate to="/" />;
-};
 
 function App() {
   const [session, setSession] = useState<any>(null);
@@ -72,17 +60,17 @@ function App() {
 
           <Route path="/gestion" element={<InteractionLog />} />
           <Route path="/campanas" element={<CampaignManager />} />
+          <Route path="/operaciones" element={<OperativeDashboard />} />
+          <Route path="/operaciones/hub" element={<OperationsHub />} />
+          <Route path="/operaciones/productividad" element={<OperationsProductivity />} />
+          <Route path="/operaciones/mis-tareas" element={<OperationsMyTasks />} />
+          <Route path="/operaciones/supervision" element={<OperationsSupervision />} />
+          <Route path="/operaciones/tecnicos" element={<TechnicianAnalytics />} />
+          <Route path="/operaciones/trazabilidad" element={<OperationsDashboard />} />
           <Route path="/pipeline" element={<Pipeline />} />
           <Route path="/historial" element={<InteractionHistory />} />
           <Route path="/gestion/cerrar" element={<DailyReportGenerator />} />
-          <Route
-            path="/configuracion"
-            element={
-              <AdminRoute>
-                <Configuration />
-              </AdminRoute>
-            }
-          />
+          <Route path="/configuracion" element={<Configuration />} />
         </Route>
       </Routes>
     </BrowserRouter>

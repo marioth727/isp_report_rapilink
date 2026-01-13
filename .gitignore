@@ -44,3 +44,10 @@ temp_client.json
 
 # Vercel
 .vercel
+
+# Scripts de depuración y temporales
+*.mjs
+*.txt
+*.sql
+!supabase_add_menu_permissions.sql
+!supabase_migration_workflow.sql

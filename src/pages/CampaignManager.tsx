@@ -2,9 +2,10 @@
 import { useState, useEffect } from 'react';
 import { WisphubService, type WispHubClient, type WispHubPlan } from '../lib/wisphub';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { Search, Phone, ArrowLeft, ArrowRight, Loader2, Filter } from 'lucide-react';
+import { Search, Phone, ArrowLeft, ArrowRight, Loader2, Filter, FileDown } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import type { CRMInteraction } from '../types';
+import * as XLSX from 'xlsx';
 
 export function CampaignManager() {
     const navigate = useNavigate();
@@ -52,21 +53,28 @@ export function CampaignManager() {
     }, [clients]);
 
     const loadInteractions = async (clientIds: number[]) => {
-        // Fetch latest interaction for these clients
-        const { data } = await supabase
-            .from('crm_interactions')
-            .select('*')
-            .in('client_id', clientIds)
-            .order('created_at', { ascending: false });
+        try {
+            // Fetch latest interaction for these clients
+            const { data, error } = await supabase
+                .from('crm_interactions')
+                .select('*')
+                .in('client_id', clientIds)
+                .order('created_at', { ascending: false });
 
-        if (data) {
-            const map = new Map<number, CRMInteraction>();
-            data.forEach((interaction: any) => {
-                if (interaction.client_id && !map.has(interaction.client_id)) {
-                    map.set(interaction.client_id, interaction);
-                }
-            });
-            setInteractionsMap(map);
+            if (error) throw error;
+
+            if (data) {
+                const map = new Map<number, CRMInteraction>();
+                data.forEach((interaction: any) => {
+                    if (interaction.client_id && !map.has(interaction.client_id)) {
+                        map.set(interaction.client_id, interaction);
+                    }
+                });
+                setInteractionsMap(map);
+            }
+        } catch (error) {
+            console.warn("[CRM] Could not load interactions (Check RLS or session):", error);
+            // Non-blocking: application continues without interaction history markers
         }
     };
 
@@ -124,6 +132,28 @@ export function CampaignManager() {
         });
     };
 
+    const exportToExcel = () => {
+        if (!clients.length) return;
+
+        const data = clients.map(c => {
+            const interaction = interactionsMap.get(c.id_servicio);
+            return {
+                Cliente: c.nombre,
+                Cedula: c.cedula,
+                Instalacion: c.fecha_instalacion ? c.fecha_instalacion.split(' ')[0] : 'N/A',
+                Plan_Actual: c.plan_internet?.nombre || 'Sin Plan',
+                Estado: c.estado,
+                Saldo: c.saldo_total || 0,
+                Ultima_Gestion: interaction ? `${new Date(interaction.created_at || '').toLocaleDateString()} - ${interaction.result}` : 'Sin gestión'
+            };
+        });
+
+        const ws = XLSX.utils.json_to_sheet(data);
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, "Clientes Campaña");
+        XLSX.writeFile(wb, `Campana_Clientes_Pagina_${page}.xlsx`);
+    };
+
     return (
         <div className="flex flex-col gap-6 p-4 md:p-8">
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -131,6 +161,13 @@ export function CampaignManager() {
                     <h1 className="text-2xl font-bold tracking-tight text-primary">Gestor de Campañas</h1>
                     <p className="text-muted-foreground">Gestiona y contacta clientes de forma proactiva.</p>
                 </div>
+                <button
+                    onClick={exportToExcel}
+                    className="flex items-center gap-2 px-4 py-2 bg-muted border border-border text-foreground rounded-lg hover:bg-muted/80 transition-shadow text-sm font-bold shadow-sm"
+                >
+                    <FileDown size={16} />
+                    Exportar Página
+                </button>
             </div>
 
             {/* Filters Bar */}

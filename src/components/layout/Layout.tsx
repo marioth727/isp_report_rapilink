@@ -1,6 +1,32 @@
 import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom';
 import { supabase } from '../../lib/supabase';
-import { LayoutDashboard, Kanban, FileText, LogOut, Calendar, Phone, Settings, History, Menu, Sun, Moon, Megaphone, ChevronDown, ChevronUp, User as UserIcon, Shield } from 'lucide-react';
+import {
+    LayoutDashboard,
+    Kanban,
+    FileText,
+    LogOut,
+    Calendar,
+    Phone,
+    Settings,
+    History,
+    Moon,
+    Sun,
+    Megaphone,
+    ChevronDown,
+    ChevronUp,
+    User as UserIcon,
+    Shield,
+    Clock,
+    Search as SearchIcon,
+    BarChart3,
+    ClipboardList,
+    ShieldAlert,
+    Menu,
+    Loader2,
+    UserPlus,
+    Activity
+} from 'lucide-react';
+import { WisphubService, type WispHubClient } from '../../lib/wisphub';
 import clsx from 'clsx';
 import { useState, useEffect } from 'react';
 import { MobileSidebar } from './MobileSidebar';
@@ -20,11 +46,37 @@ export function Layout() {
 
     const [isAdmin, setIsAdmin] = useState(false);
     const [userEmail, setUserEmail] = useState<string | null>(null);
+    const [allowedMenus, setAllowedMenus] = useState<string[]>(["Dashboard"]);
     const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({
+        'Escalamiento': true,
+        'Gestión Operativa': true,
         'Gestión Comercial': true,
         'Reportes': true,
         'Administración': false
     });
+
+    // Global Search State
+    const [searchQuery, setSearchQuery] = useState('');
+    const [searchResults, setSearchResults] = useState<WispHubClient[]>([]);
+    const [isSearching, setIsSearching] = useState(false);
+    const [showResults, setShowResults] = useState(false);
+    const [hasCriticalTickets, setHasCriticalTickets] = useState(false);
+
+    useEffect(() => {
+        checkCriticalTickets();
+        const interval = setInterval(checkCriticalTickets, 300000); // Check every 5 mins
+        return () => clearInterval(interval);
+    }, []);
+
+    const checkCriticalTickets = async () => {
+        try {
+            const tickets = await WisphubService.getAllTickets();
+            const critical = tickets.some(t => t.sla_status === 'critico');
+            setHasCriticalTickets(critical);
+        } catch (error) {
+            console.error("Error checking critical tickets:", error);
+        }
+    };
 
     useEffect(() => {
         const root = window.document.documentElement;
@@ -43,6 +95,17 @@ export function Layout() {
             setUserEmail(user.email || null);
             if (user.user_metadata?.role === 'admin') {
                 setIsAdmin(true);
+            }
+
+            // Load Menu Permissions from Profile
+            const { data: profile } = await supabase
+                .from('profiles')
+                .select('allowed_menus')
+                .eq('id', user.id)
+                .single();
+
+            if (profile?.allowed_menus) {
+                setAllowedMenus(profile.allowed_menus);
             }
         }
     };
@@ -68,7 +131,50 @@ export function Layout() {
         navigate('/login');
     };
 
+    const handleGlobalSearch = async (query: string) => {
+        setSearchQuery(query);
+        if (query.length < 3) {
+            setSearchResults([]);
+            setShowResults(false);
+            return;
+        }
+
+        setIsSearching(true);
+        setShowResults(true);
+        try {
+            const results = await WisphubService.searchClients(query);
+            setSearchResults(results);
+        } catch (error) {
+            setSearchResults([]);
+        } finally {
+            setIsSearching(false);
+        }
+    };
+
+    const handleSelectClient = (client: WispHubClient) => {
+        setSearchQuery('');
+        setShowResults(false);
+        navigate('/gestion', { state: { selectedClient: client } });
+    };
+
     const navGroups = [
+        {
+            title: 'Escalamiento',
+            icon: Activity,
+            items: [
+                { to: '/operaciones/productividad', icon: BarChart3, label: 'Productividad' },
+                { to: '/operaciones/mis-tareas', icon: ClipboardList, label: 'Mis Tareas' },
+                { to: '/operaciones/supervision', icon: ShieldAlert, label: 'Supervisión' },
+            ]
+        },
+        {
+            title: 'Gestión Operativa',
+            icon: Shield,
+            items: [
+                { to: '/operaciones', icon: LayoutDashboard, label: 'Dashboard Operativo' },
+                { to: '/operaciones/trazabilidad', icon: Clock, label: 'Control de Trazabilidad' },
+            ]
+        },
         {
             title: 'Gestión Comercial',
             icon: Megaphone,
@@ -87,7 +193,7 @@ export function Layout() {
                 { to: '/reportes/semanal', icon: Calendar, label: 'Reporte Semanal' },
             ]
         }
-    ];
+    ].filter(group => allowedMenus.includes(group.title));
 
     const NavContent = () => (
         <div className="flex flex-col h-full bg-[#11101d] text-white">
@@ -105,20 +211,22 @@ export function Layout() {
             {/* Main Navigation */}
             <nav className="flex-1 px-4 py-4 space-y-2 overflow-y-auto custom-scrollbar">
                 {/* Dashboard - Special Item (No Group) */}
-                <NavLink
-                    to="/"
-                    className={({ isActive }) =>
-                        clsx(
-                            "flex items-center gap-4 px-4 py-3 rounded-xl text-sm font-medium transition-all duration-200 group",
-                            isActive
-                                ? "bg-white text-[#11101d]"
-                                : "text-gray-400 hover:bg-white/10 hover:text-white"
-                        )
-                    }
-                >
-                    <LayoutDashboard className="w-5 h-5 transition-transform group-hover:scale-110" />
-                    <span>Dashboard</span>
-                </NavLink>
+                {allowedMenus.includes('Dashboard') && (
+                    <NavLink
+                        to="/"
+                        className={({ isActive }) =>
+                            clsx(
+                                "flex items-center gap-4 px-4 py-3 rounded-xl text-sm font-medium transition-all duration-200 group",
+                                isActive
+                                    ? "bg-white text-[#11101d]"
+                                    : "text-gray-400 hover:bg-white/10 hover:text-white"
+                            )
+                        }
+                    >
+                        <LayoutDashboard className="w-5 h-5 transition-transform group-hover:scale-110" />
+                        <span>Dashboard</span>
+                    </NavLink>
+                )}
 
                 {/* Groups with Accordion */}
                 {navGroups.map((group) => {
@@ -157,7 +265,13 @@ export function Layout() {
                                             }
                                         >
                                             <item.icon className="w-4 h-4" />
-                                            <span>{item.label}</span>
+                                            <span className="flex-1">{item.label}</span>
+                                            {item.to === '/operaciones' && hasCriticalTickets && (
+                                                <span className="relative flex h-2 w-2">
+                                                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                                                    <span className="relative inline-flex rounded-full h-2 w-2 bg-red-600"></span>
+                                                </span>
+                                            )}
                                         </NavLink>
                                     ))}
                                 </div>
@@ -263,13 +377,89 @@ export function Layout() {
                 </button>
             </div>
 
+            {/* Desktop Header / Top Bar */}
+            <div className="hidden lg:flex fixed top-0 left-64 right-0 h-16 bg-card/80 backdrop-blur-md border-b border-border items-center px-8 z-30 justify-between">
+                <div className="relative w-full max-w-md group">
+                    <div className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground group-focus-within:text-primary transition-colors">
+                        {isSearching ? <Loader2 className="w-4 h-4 animate-spin" /> : <SearchIcon className="w-4 h-4" />}
+                    </div>
+                    <input
+                        type="text"
+                        value={searchQuery}
+                        onChange={(e) => handleGlobalSearch(e.target.value)}
+                        onFocus={() => searchQuery.length >= 3 && setShowResults(true)}
+                        placeholder="Buscar cliente por nombre o cédula..."
+                        className="w-full bg-muted/50 border border-border rounded-xl py-2 pl-10 pr-4 text-sm focus:ring-2 focus:ring-primary/20 outline-none transition-all"
+                    />
+
+                    {showResults && (
+                        <div className="absolute top-full left-0 right-0 mt-2 bg-card border border-border rounded-2xl shadow-2xl overflow-hidden animate-in fade-in slide-in-from-top-2 duration-200">
+                            {searchResults.length > 0 ? (
+                                <div className="max-h-80 overflow-y-auto custom-scrollbar">
+                                    {searchResults.map((client) => (
+                                        <button
+                                            key={client.id_servicio}
+                                            onClick={() => handleSelectClient(client)}
+                                            className="w-full flex items-center gap-4 p-4 hover:bg-primary/[0.04] transition-colors border-b border-border last:border-0 text-left"
+                                        >
+                                            <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center text-primary shrink-0">
+                                                <UserPlus size={18} />
+                                            </div>
+                                            <div className="min-w-0">
+                                                <p className="text-sm font-black uppercase truncate">{client.nombre}</p>
+                                                <p className="text-[10px] text-muted-foreground font-bold">C.C. {client.cedula} • ID: {client.id_servicio}</p>
+                                            </div>
+                                        </button>
+                                    ))}
+                                </div>
+                            ) : !isSearching && (
+                                <div className="p-8 text-center">
+                                    <p className="text-xs font-bold text-muted-foreground">No se encontraron clientes para tu búsqueda.</p>
+                                </div>
+                            )}
+
+                            {searchQuery.length >= 3 && (
+                                <div className="p-3 bg-muted/50 border-t border-border flex justify-center">
+                                    <button
+                                        onClick={() => setShowResults(false)}
+                                        className="text-[9px] font-black uppercase text-muted-foreground hover:text-primary transition-colors"
+                                    >
+                                        Cerrar resultados
+                                    </button>
+                                </div>
+                            )}
+                        </div>
+                    )}
+                </div>
+
+                <div className="flex items-center gap-4">
+                    <div className="text-right hidden xl:block">
+                        <p className="text-[10px] font-black text-muted-foreground uppercase leading-none mb-1">Usuario Actual</p>
+                        <p className="text-xs font-black uppercase text-foreground">{userEmail?.split('@')[0]}</p>
+                    </div>
+                    <button
+                        onClick={() => navigate('/configuracion')}
+                        className="p-2 hover:bg-muted rounded-xl transition-colors group flex items-center gap-2"
+                        title="Editar Perfil"
+                    >
+                        <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center text-primary group-hover:bg-primary/20 transition-colors">
+                            <UserIcon size={20} />
+                        </div>
+                        <div className="flex flex-col text-left">
+                            <span className="text-[10px] font-black text-primary uppercase leading-tight">Perfil</span>
+                            <span className="text-[9px] font-bold text-muted-foreground uppercase leading-tight">Configurar</span>
+                        </div>
+                    </button>
+                </div>
+            </div>
+
             {/* Mobile Sidebar Portal */}
             <MobileSidebar isOpen={mobileMenuOpen} onClose={() => setMobileMenuOpen(false)}>
                 <NavContent />
             </MobileSidebar>
 
             {/* Main Content */}
-            <main className="flex-1 overflow-auto bg-background relative w-full pt-16 lg:pt-0">
+            <main className="flex-1 overflow-auto bg-background relative w-full pt-16">
                 <div className="max-w-7xl mx-auto p-4 md:p-8">
                     <Outlet />
                 </div>

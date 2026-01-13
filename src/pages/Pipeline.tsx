@@ -8,6 +8,7 @@ import {
     Clock,
     ArrowRight,
     AlertCircle,
+    AlertTriangle,
     Settings2,
     Trash2,
     Kanban
@@ -286,9 +287,16 @@ export function Pipeline() {
                                                         >
                                                             <div className="flex flex-col gap-3">
                                                                 <div className="flex justify-between items-start">
-                                                                    <span className="font-bold text-sm leading-tight group-hover:text-primary transition-colors">
-                                                                        {deal.client_name}
-                                                                    </span>
+                                                                    <div className="flex flex-col gap-1">
+                                                                        <span className="font-bold text-sm leading-tight group-hover:text-primary transition-colors">
+                                                                            {deal.client_name}
+                                                                        </span>
+                                                                        {deal.updated_at && (new Date().getTime() - new Date(deal.updated_at).getTime()) > (48 * 60 * 60 * 1000) && (
+                                                                            <span className="inline-flex items-center gap-1 text-[8px] font-black text-white bg-orange-600 px-1.5 py-0.5 rounded-full uppercase tracking-tighter w-fit animate-pulse">
+                                                                                <AlertTriangle className="w-2 h-2" /> Seguimiento Urgente
+                                                                            </span>
+                                                                        )}
+                                                                    </div>
                                                                     <div className="flex gap-1 items-center opacity-0 group-hover:opacity-100 transition-all">
                                                                         <button
                                                                             onClick={(e) => handleDeleteDeal(e, deal.id)}

@@ -43,10 +43,10 @@ app.all('/api/wisphub/*', async (req, res) => {
 
     const queryString = req.url.split('?')[1] || '';
 
-    // IMPORTANTE: Vite usa api.wisphub.io
+    // IMPORTANTE: Volviendo a wisphub.io por solicitud del usuario
     const targetUrl = `https://api.wisphub.io/api/${subPath}${queryString ? '?' + queryString : ''}`;
 
-    console.log(`[Proxy] URL Final: ${targetUrl}`);
+    console.log(`[Proxy] Solicitando: ${targetUrl}`);
     console.log(`[Proxy] Key: ${currentKey.substring(0, 4)}...`);
 
     try {
@@ -77,10 +77,11 @@ app.all('/api/wisphub/*', async (req, res) => {
             data = await response.json();
             // Diagnóstico para tickets si el filtrado falla
             if (targetUrl.includes('/tickets/') && data.results) {
-                console.log(`[Proxy-Debug] Tickets devueltos: ${data.results.length}`);
+                console.log(`[Proxy-Debug] Count total en API: ${data.count || 'N/A'}`);
+                console.log(`[Proxy-Debug] Tickets en este lote: ${data.results.length}`);
                 if (data.results.length > 0) {
                     const sample = data.results[0];
-                    console.log(`[Proxy-Debug] Muestra Ticket #1 - Servicio ID: ${sample.servicio}`);
+                    console.log(`[Proxy-Debug] Muestra Ticket #1 - Cliente: ${sample.nombre_cliente || sample.cliente}`);
                 }
             }
         } else {
