@@ -172,7 +172,6 @@ export function Layout() {
             icon: Shield,
             items: [
                 { to: '/operaciones', icon: LayoutDashboard, label: 'Dashboard Operativo' },
-                { to: '/pipeline', icon: Kanban, label: 'Pipeline de Ventas' },
                 { to: '/operaciones/trazabilidad', icon: Clock, label: 'Control de Trazabilidad' },
             ]
         },
@@ -181,6 +180,7 @@ export function Layout() {
             icon: Megaphone,
             items: [
                 { to: '/campanas', icon: Megaphone, label: 'Gestor de Campañas' },
+                { to: '/pipeline', icon: Kanban, label: 'Pipeline de Ventas' },
                 { to: '/gestion', icon: Phone, label: 'Gestión Manual' },
                 { to: '/historial', icon: History, label: 'Historial' },
             ]
