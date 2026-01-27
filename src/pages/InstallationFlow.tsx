@@ -84,7 +84,7 @@ export default function InstallationFlow() {
     const [plans, setPlans] = useState<any[]>([]);
     const [routers, setRouters] = useState<any[]>([]);
     const [sectors, setSectors] = useState<any[]>([]);
-    const [oltData, setOltData] = useState<any>(null); // Datos escaneados de OLT
+    const [oltData] = useState<any>(null); // Datos escaneados de OLT
 
     // INFO: Signal Data y Justification eliminados
 
