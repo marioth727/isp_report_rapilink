@@ -1,7 +1,7 @@
 import { useForm } from 'react-hook-form';
 import { supabase } from '../../lib/supabase';
 import { useState, useEffect } from 'react';
-import { Save, User, Phone, Clock, DollarSign, AlertCircle, Wrench, BookOpen, Search, Loader2, Play, Square, Activity, Zap, ExternalLink, RefreshCw } from 'lucide-react';
+import { Save, User, Phone, Clock, DollarSign, AlertCircle, Wrench, BookOpen, Search, Loader2, Play, Square, Activity, Zap, ExternalLink, RefreshCw, Camera, X } from 'lucide-react';
 import type { CRMInteraction } from '../../types';
 import { PREDEFINED_OBJECTIONS, REPORT_CATEGORIES, PLAN_OPTIONS } from '../../types';
 import clsx from 'clsx';
@@ -68,6 +68,8 @@ export function InteractionForm({ onSuccess, initialValues, preSelectedClient, p
     const [dailyGestiones, setDailyGestiones] = useState(0);
     const [avgNps, setAvgNps] = useState(0);
     const [pendingFollowups, setPendingFollowups] = useState<any[]>([]);
+    const [selectedFile, setSelectedFile] = useState<File | null>(null);
+    const [filePreview, setFilePreview] = useState<string | null>(null);
 
     const { register, handleSubmit, reset, watch, setValue, formState: { errors } } = useForm<CRMInteraction>({
         defaultValues: {
@@ -136,6 +138,27 @@ export function InteractionForm({ onSuccess, initialValues, preSelectedClient, p
         const m = Math.floor(totalSeconds / 60).toString().padStart(2, '0');
         const s = (totalSeconds % 60).toString().padStart(2, '0');
         return `${m}:${s}`;
+    };
+
+    const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (file) {
+            if (file.size > 5 * 1024 * 1024) { // 5MB limit
+                dispatchToast("Archivo muy grande", "error", "El límite es 5MB");
+                return;
+            }
+            setSelectedFile(file);
+            const reader = new FileReader();
+            reader.onloadend = () => {
+                setFilePreview(reader.result as string);
+            };
+            reader.readAsDataURL(file);
+        }
+    };
+
+    const removeFile = () => {
+        setSelectedFile(null);
+        setFilePreview(null);
     };
 
     const fetchDailyStats = async () => {
@@ -270,69 +293,45 @@ export function InteractionForm({ onSuccess, initialValues, preSelectedClient, p
     const isSpecialCase = watch('is_special_case');
     const technicianRequired = watch('technician_required');
 
+    const dispatchToast = (message: string, type: 'success' | 'error' | 'info' | 'loading', description?: string, id?: string) => {
+        window.dispatchEvent(new CustomEvent('app:toast', {
+            detail: { message, type, description, id, duration: type === 'loading' ? 0 : 4000 }
+        }));
+    };
+
     const onSubmit = async (data: CRMInteraction) => {
         setSaving(true);
         try {
             const { data: { user } } = await supabase.auth.getUser();
             if (!user) throw new Error('No user found');
 
-            // 1. WispHub Sync (Technical Ticket and/or Interaction Note)
-            if (selectedClientId) {
-                const username = user.user_metadata?.full_name || user.email?.split('@')[0] || 'Asesor';
-                const mainNote = (document.getElementById('interaction_description') as HTMLTextAreaElement)?.value || data.special_case_description || '';
+            // 0. Subir archivo a Supabase Storage si existe
+            let attachmentUrl = null;
+            if (selectedFile) {
+                const fileExt = selectedFile.name.split('.').pop();
+                const fileName = `${user.id}_${Date.now()}.${fileExt}`;
+                const filePath = `attachments/${fileName}`;
 
-                // A. Update Global Client Comments (Universal Sync)
-                const crmNote = [
-                    `[CRM - ${username}]`,
-                    `Resultado: ${data.result}`,
-                    data.objection ? `Objeción: ${data.objection}` : null,
-                    data.suggested_plan ? `Plan Sugerido: ${data.suggested_plan}` : null,
-                    data.price_difference ? `Diferencia: $${data.price_difference}` : null,
-                    `NPS: ${data.nps ?? 'N/A'}`,
-                    `Duración: ${data.duration_min} min`,
-                    `Nota: ${mainNote}`
-                ].filter(Boolean).join(' | ');
+                const { error: uploadError } = await supabase.storage
+                    .from('interaction-attachments')
+                    .upload(filePath, selectedFile);
 
-                await WisphubService.updateClientComments(selectedClientId, crmNote);
-
-                // B. Create Technical Ticket (if applicable)
-                if (isTechSupport || technicianRequired) {
-                    const ticketDescription = (document.getElementById('ticket_description') as HTMLTextAreaElement)?.value || mainNote;
-                    const ticketSubject = (document.getElementById('ticket_subject') as HTMLSelectElement)?.value || 'Gestión desde Plataforma';
-                    const ticketPriority = (document.getElementById('ticket_priority') as HTMLSelectElement)?.value;
-                    const ticketTechnicianSelect = (document.getElementById('ticket_technician') as HTMLSelectElement)?.value;
-                    const ticketTechnicianManual = (document.getElementById('ticket_technician_manual') as HTMLInputElement)?.value;
-                    const ticketTechnician = ticketTechnicianManual || ticketTechnicianSelect;
-
-                    if (!ticketDescription || ticketDescription.length < 3) {
-                        alert('⚠️ La descripción del ticket es muy corta.');
-                        setSaving(false);
-                        return;
-                    }
-
-                    const ticketResult = await WisphubService.createTicket({
-                        servicio: selectedClientId,
-                        asunto: ticketSubject,
-                        descripcion: `[CRM - ${username}] ${ticketDescription}`,
-                        prioridad: parseInt(ticketPriority || '2'),
-                        technicianId: ticketTechnician || undefined
-                    });
-
-                    if (ticketResult.success) {
-                        alert(`✅ Ticket creado exitosamente en WispHub bajo la etiqueta "CRM - Report".`);
-                    } else {
-                        const errorMsg = `❌ Error en WispHub: ${ticketResult.message}`;
-                        alert(errorMsg);
-                        console.error(errorMsg);
-                    }
+                if (uploadError) {
+                    console.error("Error al subir archivo:", uploadError);
+                } else {
+                    const { data: { publicUrl } } = supabase.storage
+                        .from('interaction-attachments')
+                        .getPublicUrl(filePath);
+                    attachmentUrl = publicUrl;
                 }
             }
 
-            // 2. Save Interaction to Supabase (Existing logic)
+            // 1. Guardado Local PRIORITARIO (Supabase)
             const interactionData = {
                 ...data,
                 user_id: user.id,
-                client_id: selectedClientId || undefined, // Save WispHub ID
+                client_id: selectedClientId || undefined,
+                attachment_url: attachmentUrl,
                 technician_schedule: null,
                 special_case_description: data.is_special_case ? data.special_case_description : null,
                 special_case_number: data.is_special_case ? data.special_case_number : null,
@@ -341,95 +340,161 @@ export function InteractionForm({ onSuccess, initialValues, preSelectedClient, p
             };
 
             let error;
+            let savedInteraction: any = null;
+
             if (initialValues?.id) {
-                const { error: updateError } = await supabase
+                const { data: updated, error: updateError } = await supabase
                     .from('crm_interactions')
                     .update(interactionData)
-                    .eq('id', initialValues.id);
+                    .eq('id', initialValues.id)
+                    .select()
+                    .single();
                 error = updateError;
+                savedInteraction = updated;
             } else {
-                const { error: insertError } = await supabase
+                const { data: inserted, error: insertError } = await supabase
                     .from('crm_interactions')
-                    .insert(interactionData);
+                    .insert(interactionData)
+                    .select()
+                    .single();
                 error = insertError;
+                savedInteraction = inserted;
             }
 
             if (error) throw error;
 
-            // 3. Sync to Pipeline (Automatic Lead Management)
-            if (selectedClientId) {
-                try {
-                    const { data: stages } = await supabase
-                        .from('pipeline_stages')
-                        .select('*')
-                        .eq('user_id', user.id)
-                        .order('order_index');
+            // --- CAPTURA DE VALORES DE UI ANTES DEL RESET ---
+            const uiTicketSubject = (document.getElementById('ticket_subject') as HTMLSelectElement)?.value || 'Gestión desde Plataforma';
+            const uiTicketDescription = (document.getElementById('ticket_description') as HTMLTextAreaElement)?.value || '';
+            const uiTicketPriority = (document.getElementById('ticket_priority') as HTMLSelectElement)?.value || '2';
+            const uiTicketTechnicianAuto = (document.getElementById('ticket_technician') as HTMLSelectElement)?.value;
+            const uiTicketTechnicianManual = (document.getElementById('ticket_technician_manual') as HTMLInputElement)?.value;
+            const uiTicketTechnician = uiTicketTechnicianManual || uiTicketTechnicianAuto;
+            const uiMainNote = (document.getElementById('interaction_description') as HTMLTextAreaElement)?.value || data.special_case_description || '';
 
-                    if (stages && stages.length > 0) {
-                        let targetStageId = null;
+            // --- DESACOPLE: EL USUARIO YA PUEDE CONTINUAR ---
+            const username = user.user_metadata?.full_name || user.email?.split('@')[0] || 'Asesor';
+            const clientName = data.client_reference.split('(')[0].trim();
+            const syncId = `sync-${Date.now()}`;
 
-                        // Decision logic for stage
-                        if (data.result === 'Aceptó Migración') {
-                            targetStageId = stages.find(s => s.name.toLowerCase().includes('ganado'))?.id || stages[stages.length - 1].id;
-                        } else if (data.result === 'Lo pensará') {
-                            targetStageId = stages.find(s => s.name.toLowerCase().includes('seguimiento'))?.id || stages[Math.min(1, stages.length - 1)].id;
-                        } else if (['No contesta', 'Cuelgan', 'Equivocado'].includes(data.result)) {
-                            // Optionally move to 'Pendiente' or leave as is if already exists
-                        }
+            // Notificar éxito local
+            dispatchToast("Gestión Guardada ✅", "success", `Cliente: ${clientName}`, `local-${syncId}`);
 
-                        if (targetStageId) {
-                            await supabase
-                                .from('sales_pipeline')
-                                .upsert({
-                                    user_id: user.id,
-                                    client_id: selectedClientId,
-                                    client_name: data.client_reference.split('(')[0].trim(),
-                                    cedula: data.client_reference.match(/\(([^)]+)\)/)?.[1] || '',
-                                    phone: data.special_case_number || '',
-                                    current_plan: data.current_plan,
-                                    last_result: data.result,
-                                    stage_id: targetStageId,
-                                    suggested_plan: data.suggested_plan,
-                                    last_interaction_id: initialValues?.id || undefined, // Logic to get the newly created ID if possible
-                                    updated_at: new Date().toISOString()
-                                }, {
-                                    onConflict: 'user_id,client_id'
-                                });
-                        }
-                    }
-                } catch (syncError) {
-                    console.error('Error syncing to pipeline:', syncError);
-                }
+            // Resetear UI inmediatamente
+            if (!initialValues) {
+                reset({
+                    result: 'No contesta',
+                    duration_min: 1,
+                    is_special_case: false,
+                    technician_required: false,
+                    client_reference: '',
+                    current_plan: '',
+                    migration_category: '',
+                    objection: '',
+                    suggested_plan: '',
+                    price_difference: undefined,
+                    special_case_description: '',
+                    special_case_number: '',
+                    scheduled_followup: undefined
+                });
+                setCurrentPlanPrice(0);
+                setRecentTickets([]);
+                setSelectedClientId(null);
+                setIsTimerRunning(false);
+                setTimerSeconds(0);
+                setIsManualDuration(false);
+                setSelectedFile(null);
+                setFilePreview(null);
             }
-
-            reset({
-                result: 'No contesta',
-                duration_min: 1,
-                is_special_case: false,
-                technician_required: false,
-                client_reference: '',
-                current_plan: '',
-                migration_category: '',
-                objection: '',
-                suggested_plan: '',
-                price_difference: undefined,
-                special_case_description: '',
-                special_case_number: '',
-                scheduled_followup: undefined
-            });
-            setCurrentPlanPrice(0);
-            setRecentTickets([]);
-            setSelectedClientId(null);
-
-            // Reset Timer
-            setIsTimerRunning(false);
-            setTimerSeconds(0);
-            setIsManualDuration(false);
-            fetchDailyStats(); // Refresh dashboard
+            fetchDailyStats();
             onSuccess();
+            setSaving(false);
+
+            // 2. Sincronización en SEGUNDO PLANO (WispHub + Pipeline)
+            if (selectedClientId) {
+                (async () => {
+                    dispatchToast("Sincronizando WispHub...", "loading", `Enviando datos de ${clientName}`, syncId);
+
+                    try {
+                        const mainNote = uiMainNote;
+
+                        // A. Comentarios en WispHub
+                        const crmNote = [
+                            `[CRM - ${username}]`,
+                            `Resultado: ${data.result}`,
+                            data.objection ? `Objeción: ${data.objection}` : null,
+                            data.suggested_plan ? `Plan Sugerido: ${data.suggested_plan}` : null,
+                            `NPS: ${data.nps ?? 'N/A'}`,
+                            `Nota: ${mainNote}`
+                        ].filter(Boolean).join(' | ');
+
+                        await WisphubService.updateClientComments(selectedClientId, crmNote);
+
+                        // B. Ticket Técnico
+                        if (isTechSupport || technicianRequired) {
+                            const ticketDescription = uiTicketDescription || mainNote;
+                            const ticketSubject = uiTicketSubject;
+                            const ticketPriority = uiTicketPriority;
+                            const ticketTechnician = uiTicketTechnician;
+
+                            const ticketResult = await WisphubService.createTicket({
+                                servicio: selectedClientId,
+                                asunto: ticketSubject,
+                                descripcion: `[CRM - ${username}] ${ticketDescription}`,
+                                prioridad: parseInt(ticketPriority),
+                                technicianId: ticketTechnician || undefined,
+                                file: selectedFile || undefined
+                            });
+
+                            if (!ticketResult.success) {
+                                throw new Error(`WispHub Ticket: ${ticketResult.message}`);
+                            }
+                        }
+
+                        // C. Pipeline Sync
+                        const { data: stages } = await supabase
+                            .from('pipeline_stages')
+                            .select('*')
+                            .eq('user_id', user.id)
+                            .order('order_index');
+
+                        if (stages && stages.length > 0) {
+                            let targetStageId = null;
+                            if (data.result === 'Aceptó Migración') {
+                                targetStageId = stages.find(s => s.name.toLowerCase().includes('ganado'))?.id || stages[stages.length - 1].id;
+                            } else if (data.result === 'Lo pensará') {
+                                targetStageId = stages.find(s => s.name.toLowerCase().includes('seguimiento'))?.id || stages[Math.min(1, stages.length - 1)].id;
+                            }
+
+                            if (targetStageId) {
+                                await supabase
+                                    .from('sales_pipeline')
+                                    .upsert({
+                                        user_id: user.id,
+                                        client_id: selectedClientId,
+                                        client_name: clientName,
+                                        cedula: data.client_reference.match(/\(([^)]+)\)/)?.[1] || '',
+                                        phone: data.special_case_number || '',
+                                        current_plan: data.current_plan,
+                                        last_result: data.result,
+                                        stage_id: targetStageId,
+                                        suggested_plan: data.suggested_plan,
+                                        last_interaction_id: savedInteraction?.id,
+                                        updated_at: new Date().toISOString()
+                                    }, { onConflict: 'user_id,client_id' });
+                            }
+                        }
+
+                        dispatchToast("Sincronización Completa ✅", "success", `WispHub & Pipeline actualizados para ${clientName}`, syncId);
+
+                    } catch (syncErr: any) {
+                        console.error("[Sync Error]", syncErr);
+                        dispatchToast("Error de Sincronización ⚠️", "error", `WispHub no respondió: ${syncErr.message || 'Error de red'}. El registro local es válido.`, syncId);
+                    }
+                })();
+            }
         } catch (error: any) {
-            alert('Error al guardar: ' + error.message);
-        } finally {
+            alert('Error al guardar localmente: ' + error.message);
             setSaving(false);
         }
     };
@@ -1200,17 +1265,17 @@ export function InteractionForm({ onSuccess, initialValues, preSelectedClient, p
                                             <option value="">Seleccionar técnico...</option>
                                             {technicians.length > 0 ? (
                                                 technicians.map(tech => (
-                                                    <option key={tech.id || tech.usuario} value={tech.id}>
+                                                    <option key={tech.id || tech.usuario} value={tech.usuario}>
                                                         {tech.nombre}
                                                     </option>
                                                 ))
                                             ) : (
                                                 <>
-                                                    {/* Fallback IDs (Numeric IDs for WispHub) */}
-                                                    <option value="1425368">TOMAS MCAUSLAND</option>
-                                                    <option value="1420238">JAVIER OLIVERA</option>
-                                                    <option value="1425017">ELENA PEREZ</option>
-                                                    <option value="1408762">ADMINISTRACIÓN</option>
+                                                    {/* Fallback Strings (Usernames for WispHub) */}
+                                                    <option value="tecnico4@rapilink-sas">TOMAS MCAUSLAND</option>
+                                                    <option value="tecnico1@rapilink-sas">JAVIER OLIVERA</option>
+                                                    <option value="yuranis.moreno@rapilink-sas">ELENA PEREZ</option>
+                                                    <option value="admin@rapilink-sas">ADMINISTRACIÓN</option>
                                                 </>
                                             )}
                                         </select>
@@ -1227,6 +1292,44 @@ export function InteractionForm({ onSuccess, initialValues, preSelectedClient, p
                                         className="w-full bg-background border border-input rounded-md p-2 text-sm min-h-[100px]"
                                         placeholder="Describe el problema, pruebas realizadas, síntomas, etc..."
                                     />
+                                </div>
+
+                                {/* File Attachment UI */}
+                                <div className="space-y-2">
+                                    <label className="text-xs font-medium text-orange-700 dark:text-orange-400">
+                                        Adjuntar Imagen (Opcional)
+                                    </label>
+                                    <div className="flex items-center gap-4">
+                                        <label className="cursor-pointer group flex items-center justify-center w-12 h-12 rounded-lg border-2 border-dashed border-input hover:border-orange-500 hover:bg-orange-500/5 transition-all">
+                                            <Camera className="w-5 h-5 text-muted-foreground group-hover:text-orange-500" />
+                                            <input
+                                                type="file"
+                                                accept="image/*"
+                                                className="hidden"
+                                                onChange={handleFileChange}
+                                            />
+                                        </label>
+
+                                        {filePreview && (
+                                            <div className="relative group">
+                                                <img
+                                                    src={filePreview}
+                                                    alt="Preview"
+                                                    className="w-12 h-12 rounded-lg object-cover border border-border"
+                                                />
+                                                <button
+                                                    type="button"
+                                                    onClick={removeFile}
+                                                    className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
+                                                >
+                                                    <X className="w-3 h-3" />
+                                                </button>
+                                            </div>
+                                        )}
+                                        {!filePreview && (
+                                            <p className="text-[10px] text-muted-foreground">Haz clic en el icono para subir una foto de la falla.</p>
+                                        )}
+                                    </div>
                                 </div>
 
                                 <div className="grid grid-cols-2 gap-4">

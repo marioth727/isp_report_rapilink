@@ -233,25 +233,25 @@ export function Pipeline() {
                     {stages.map((stage) => (
                         <div key={stage.id} className="flex-shrink-0 w-80 flex flex-col gap-4">
                             {/* Column Header */}
-                            <div className="flex items-center justify-between px-2">
-                                <div className="flex items-center gap-2">
+                            <div className="flex items-center justify-between px-2 mb-2">
+                                <div className="flex items-center gap-3">
                                     <div
-                                        className="w-2 h-6 rounded-full"
-                                        style={{ backgroundColor: stage.color }}
+                                        className="w-1.5 h-1.5 rounded-full ring-2 ring-offset-2"
+                                        style={{ backgroundColor: stage.color, boxShadow: `0 0 0 2px ${stage.color}20` }}
                                     />
-                                    <h3 className="font-bold text-sm uppercase tracking-wider">
+                                    <h3 className="font-extrabold text-[11px] uppercase tracking-widest text-slate-500">
                                         {stage.name}
                                     </h3>
-                                    <span className="bg-secondary text-secondary-foreground text-[10px] font-bold px-2 py-0.5 rounded-full">
+                                    <span className="bg-slate-100 text-slate-600 text-[10px] font-black px-2 py-0.5 rounded-md border border-slate-200">
                                         {deals.filter(d => d.stage_id === stage.id).length}
                                     </span>
                                 </div>
                                 {isConfiguring && (
                                     <button
                                         onClick={() => handleDeleteStage(stage.id)}
-                                        className="p-1 hover:bg-destructive/10 hover:text-destructive rounded-lg transition-colors"
+                                        className="p-1.5 hover:bg-red-50 hover:text-red-500 rounded-lg transition-colors text-slate-400"
                                     >
-                                        <Trash2 className="w-4 h-4" />
+                                        <Trash2 className="w-3.5 h-3.5" />
                                     </button>
                                 )}
                             </div>
@@ -263,8 +263,8 @@ export function Pipeline() {
                                         {...provided.droppableProps}
                                         ref={provided.innerRef}
                                         className={clsx(
-                                            "flex-1 flex flex-col gap-3 p-3 rounded-2xl transition-colors min-h-[150px]",
-                                            snapshot.isDraggingOver ? "bg-primary/5 ring-2 ring-primary/20" : "bg-secondary/20"
+                                            "flex-1 flex flex-col gap-3 p-2 rounded-2xl transition-colors min-h-[150px]",
+                                            snapshot.isDraggingOver ? "bg-blue-50/50 ring-2 ring-blue-100 border-dashed border-2 border-blue-200" : "bg-slate-50/50 border border-transparent"
                                         )}
                                     >
                                         {deals
@@ -278,12 +278,16 @@ export function Pipeline() {
                                                     {(provided, snapshot) => (
                                                         <div
                                                             ref={provided.innerRef}
-                                                            {...provided.draggableProps}
                                                             {...provided.dragHandleProps}
                                                             className={clsx(
-                                                                "bg-card p-4 rounded-xl border border-border shadow-sm hover:shadow-md transition-all group",
-                                                                snapshot.isDragging && "rotate-2 scale-105 shadow-xl ring-2 ring-primary"
+                                                                "bg-white p-4 rounded-xl border border-slate-200 shadow-sm hover:shadow-md transition-all group",
+                                                                "border-l-4", // New Accent Border
+                                                                snapshot.isDragging ? "rotate-2 scale-105 shadow-xl ring-2 ring-blue-500 z-50" : "hover:-translate-y-1"
                                                             )}
+                                                            style={{
+                                                                ...provided.draggableProps.style,
+                                                                borderLeftColor: stage.color // Dynamic accent color
+                                                            }}
                                                         >
                                                             <div className="flex flex-col gap-3">
                                                                 <div className="flex justify-between items-start">

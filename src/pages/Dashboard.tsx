@@ -24,9 +24,16 @@ export function Dashboard() {
     const [planPrices, setPlanPrices] = useState<any[]>([]);
     const [leaderboard, setLeaderboard] = useState<any[]>([]);
     const [staleLeads, setStaleLeads] = useState<any[]>([]);
+    const [userName, setUserName] = useState<string>('Agente');
 
-    // --- DATE FILTERING STATE ---
-    const [selectedDateFilter, setSelectedDateFilter] = useState<string>(new Date().toISOString().split('T')[0]);
+    // --- DATE FILTERING STATE (Corregido para zona horaria local Colombia UTC-5) ---
+    const getLocalDateString = () => {
+        const now = new Date();
+        const offset = now.getTimezoneOffset(); // minutos
+        const localDate = new Date(now.getTime() - offset * 60000);
+        return localDate.toISOString().split('T')[0];
+    };
+    const [selectedDateFilter, setSelectedDateFilter] = useState<string>(getLocalDateString());
 
     useEffect(() => {
         fetchData();
@@ -49,6 +56,17 @@ export function Dashboard() {
                 if (configData.daily_goal) setDailyGoal(configData.daily_goal);
                 if (configData.thresholds) setThresholds(configData.thresholds);
                 if (configData.plan_prices) setPlanPrices(configData.plan_prices);
+            }
+
+            // 2. Fetch User Name from profiles
+            const { data: profileData } = await supabase
+                .from('profiles')
+                .select('full_name')
+                .eq('id', user.id)
+                .single();
+
+            if (profileData?.full_name) {
+                setUserName(profileData.full_name);
             }
 
             fetchDashboardData(user.id);
@@ -146,7 +164,7 @@ export function Dashboard() {
         return format(new Date(i.created_at), 'yyyy-MM-dd') === selectedDateFilter;
     });
 
-    const isViewToday = selectedDateFilter === new Date().toISOString().split('T')[0];
+    const isViewToday = selectedDateFilter === getLocalDateString();
 
     const todayKpis = {
         calls: todayInteractions.length,
@@ -206,7 +224,7 @@ export function Dashboard() {
                         <div className="flex flex-col xl:flex-row xl:items-start justify-between gap-4 mb-4">
                             <div className="space-y-1">
                                 <h2 className="text-3xl font-bold tracking-tight text-foreground bg-gradient-to-r from-primary to-indigo-500 bg-clip-text text-transparent">
-                                    {isViewToday ? "Hola, Agente" : "Análisis Histórico"}
+                                    {isViewToday ? `Hola, ${userName}` : "Análisis Histórico"}
                                 </h2>
                                 <div className="flex items-center gap-2 text-muted-foreground mt-1 text-base">
                                     <span>Viendo datos del:</span>

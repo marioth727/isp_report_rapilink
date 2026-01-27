@@ -23,6 +23,17 @@ export default defineConfig(({ mode }) => {
             });
           },
         },
+        '/api/smartolt': {
+          target: 'https://rapilinksas.smartolt.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/api\/smartolt/, '/api'),
+          configure: (proxy, _options) => {
+            proxy.on('proxyReq', (proxyReq, _req, _res) => {
+              const apiKey = env.VITE_SMARTOLT_API_KEY || '';
+              proxyReq.setHeader('X-Token', apiKey);
+            });
+          },
+        },
       },
     },
   }

@@ -12,6 +12,7 @@ export interface WorkflowProcess {
     created_at: string;
     updated_at: string;
     metadata: Record<string, any>;
+    escalation_level?: number;
 }
 
 export interface WorkflowActivity {

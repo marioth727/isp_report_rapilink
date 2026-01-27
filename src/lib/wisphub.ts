@@ -10,7 +10,8 @@ export interface WispHubClient {
     };
     saldo_total?: number;
     fecha_instalacion?: string;
-    last_result?: string;
+    last_result?: string; // Para mostrar errores/éxitos previos
+    telefono?: string;    // Propiedad opcional para evitar errores ts(2339)
 }
 
 export interface WispHubPlan {
@@ -28,6 +29,7 @@ export interface WispHubStaff {
     id?: number | string;
     nombre: string;
     usuario: string;
+    email?: string;
     nivel: string;
 }
 
@@ -56,64 +58,124 @@ export const TICKET_SUBJECTS = [
 
 const FALLBACK_TECHNICIANS: WispHubStaff[] = [
     { id: "tecnico4@rapilink-sas", nombre: "TOMAS MCAUSLAND", usuario: "tecnico4@rapilink-sas", nivel: "Técnico" },
-    { id: "tecnico2@rapilink-sas", nombre: "VALENTINA SUAREZ", usuario: "tecnico2@rapilink-sas", nivel: "Técnico" },
-    { id: "tecnico1@rapilink-sas", nombre: "ELENA MACHADO", usuario: "tecnico1@rapilink-sas", nivel: "Técnico" },
-    { id: "administrador@rapilink-sas", nombre: "Vanessa Barrera", usuario: "administrador@rapilink-sas", nivel: "Administrativo" }
+    { id: "asistente.administrativa1@rapilink-sas", nombre: "VALENTINA SUAREZ", usuario: "asistente.administrativa1@rapilink-sas", nivel: "Técnico" },
+    { id: "tecnico1@rapilink-sas", nombre: "ALEXANDER GOMEZ", usuario: "tecnico1@rapilink-sas", nivel: "Técnico" },
+    { id: "asistente.administravo.3@rapilink-sas", nombre: "VANESSA BARRERA", usuario: "asistente.administravo.3@rapilink-sas", nivel: "Técnico" }
 ];
 
 let GLOBAL_CLIENT_CACHE: WispHubClient[] | null = null;
+let GLOBAL_STAFF_CACHE: WispHubStaff[] | null = null;
 let CACHE_PROMISE: Promise<void> | null = null;
+let STAFF_PROMISE: Promise<WispHubStaff[]> | null = null;
+let SUBJECTS_FETCH_FAILED = false;
 
+export function toProxyUrl(url: string | null): string | null {
+    if (!url) return null;
+    return url.replace(/https?:\/\/(api\.)?wisphub\.(io|net)\/api\/(v1\/)?/, BASE_URL + '/');
+}
 
-// Helper to handle API requests with retries and better error handling
-async function safeFetch(url: string, options: RequestInit = {}, retries = 2): Promise<Response> {
+export async function safeFetch(url: string, options: RequestInit = {}, retries = 2, silent = false): Promise<Response> {
+    const proxyUrl = toProxyUrl(url) || url;
     for (let i = 0; i <= retries; i++) {
         try {
-            const res = await fetch(url, options);
+            // Asegurar cabeceras de API si no están presentes
+            const finalOptions: RequestInit = {
+                ...options,
+                headers: {
+                    'Accept': 'application/json',
+                    ...(options.headers || {})
+                }
+            };
+
+            const res = await fetch(proxyUrl, finalOptions);
             if (res.ok) return res;
 
             let errorBody = 'Unable to parse body';
-            try {
-                const clonedRes = res.clone();
-                errorBody = await clonedRes.text();
-            } catch (bodyError) {
-                errorBody = `Body capture failed: ${bodyError}`;
+            if (!silent) {
+                try {
+                    const clonedRes = res.clone();
+                    errorBody = await clonedRes.text();
+                    console.warn(`[WispHub] Raw error body details: ${errorBody}`);
+                } catch (bodyError) {
+                    console.warn(`[WispHub] Body capture failed: ${bodyError}`);
+                }
             }
 
-            console.error(`[WispHub API ERROR]
-URL: ${url}
-Status: ${res.status} ${res.statusText}
-Payload: ${errorBody}
-Attempt: ${i + 1}/${retries + 1}`);
+            if (!silent) {
+                console.error(`[WispHub API ERROR] URL: ${proxyUrl} Status: ${res.status} Attempt: ${i + 1}/${retries + 1}`);
+            } else {
+                // Debug log to ensure silent mode is working
+                // console.log(`[WispHub Silent] 404 on ${proxyUrl}`);
+            }
 
-            if (res.status === 404 || res.status === 401 || res.status === 403) return res;
+            if (res.status === 404 || res.status === 401 || res.status === 403 || res.status === 400) return res;
 
         } catch (e) {
-            console.error(`[WispHub FETCH EXCEPTION]
-URL: ${url}
-Error: ${e}
-Attempt: ${i + 1}/${retries + 1}`);
+            if (!silent) console.error(`[WispHub FETCH EXCEPTION] URL: ${proxyUrl} Error: ${e}`);
         }
         if (i < retries) await new Promise(r => setTimeout(r, 1000 * (i + 1)));
     }
-    throw new Error(`Failed to fetch ${url} after ${retries + 1} attempts`);
+    if (!silent) throw new Error(`Failed to fetch ${proxyUrl} after ${retries + 1} attempts`);
+    return new Response(null, { status: 500 });
+}
+
+export function stripHtml(html: string): string {
+    if (!html) return '';
+    return html
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<p>/gi, '\n')
+        .replace(/<\/p>/gi, '')
+        .replace(/<[^>]*>?/gm, '')
+        .replace(/&nbsp;/g, ' ')
+        .replace(/\n\s*\n/g, '\n\n')
+        .trim();
 }
 
 export const WisphubService = {
     async getStaff(): Promise<WispHubStaff[]> {
+        if (GLOBAL_STAFF_CACHE) return GLOBAL_STAFF_CACHE;
+        if (STAFF_PROMISE) return STAFF_PROMISE;
+
+        STAFF_PROMISE = (async () => {
+            try {
+                const response = await safeFetch(`${BASE_URL}/staff/?limit=1000`);
+                if (!response.ok) return FALLBACK_TECHNICIANS;
+                const data = await response.json();
+                const staff = data.results || data || [];
+                const mapped = staff.map((s: any) => ({
+                    id: s.id || s.id_usuario,
+                    nombre: s.nombre,
+                    usuario: s.usuario || s.username || s.email,
+                    email: s.email || s.email_usuario || '',
+                    nivel: s.nivel || 'Desconocido'
+                }));
+                GLOBAL_STAFF_CACHE = mapped;
+                return mapped;
+            } catch (error) {
+                console.error('[WisphubService] Staff Fetch Failed:', error);
+                return FALLBACK_TECHNICIANS;
+            } finally {
+                STAFF_PROMISE = null;
+            }
+        })();
+        return STAFF_PROMISE;
+    },
+
+    async getInstallations(filters?: { search?: string; tecnico?: string | number; estado?: string; zona?: string }): Promise<any[]> {
         try {
-            const response = await safeFetch(`${BASE_URL}/staff/`);
-            if (!response.ok) return FALLBACK_TECHNICIANS;
+            let url = `${BASE_URL}/instalaciones/?limit=50`;
+            if (filters?.search) url += `&search=${encodeURIComponent(filters.search)}`;
+            if (filters?.tecnico) url += `&tecnico=${filters.tecnico}`;
+            if (filters?.estado) url += `&estado=${filters.estado}`;
+            if (filters?.zona) url += `&nombre_zona=${encodeURIComponent(filters.zona)}`;
+
+            const response = await safeFetch(url);
+            if (!response.ok) return [];
             const data = await response.json();
-            const staff = data.results || data || [];
-            return staff.map((s: any) => ({
-                id: s.id || s.id_usuario,
-                nombre: s.nombre,
-                usuario: s.usuario || s.email,
-                nivel: s.nivel || 'Desconocido'
-            }));
+            return data.results || [];
         } catch (error) {
-            return FALLBACK_TECHNICIANS;
+            console.error('[WisphubService] Error fetching installations:', error);
+            return [];
         }
     },
 
@@ -144,15 +206,11 @@ export const WisphubService = {
                 let pages = 0;
 
                 while (nextUrl && pages < 100) {
-                    const res = await fetch(nextUrl);
+                    const res = await safeFetch(nextUrl);
                     if (!res.ok) break;
                     const data = await res.json();
                     allClients = [...allClients, ...(data.results || [])];
-                    if (data.next) {
-                        nextUrl = data.next.replace(/https?:\/\/(api\.)?wisphub\.(io|net)\/api/, '/api/wisphub');
-                    } else {
-                        nextUrl = null;
-                    }
+                    nextUrl = toProxyUrl(data.next);
                     pages++;
                 }
                 GLOBAL_CLIENT_CACHE = allClients;
@@ -185,7 +243,7 @@ export const WisphubService = {
 
     async getInternetPlans(): Promise<WispHubPlan[]> {
         try {
-            const response = await fetch(`${BASE_URL}/plan-internet/?limit=1000`);
+            const response = await safeFetch(`${BASE_URL}/plan-internet/?limit=1000`);
             if (!response.ok) return [];
             const data = await response.json();
             return data.results || [];
@@ -194,23 +252,177 @@ export const WisphubService = {
         }
     },
 
-    async getTickets(serviceId: number, clientName?: string, cedula?: string): Promise<any[]> {
+    async getRouters(): Promise<any[]> {
+        try {
+            // FALLBACK: Usamos /zonas/ como fuente de routers/servidores ya que el endpoint /mikrotiks/ falla
+            const response = await safeFetch(`${BASE_URL}/zonas/?limit=1000`);
+            if (!response.ok) return [];
+            const data = await response.json();
+            return (data.results || []).map((z: any) => ({
+                id: z.id,
+                id_router: z.id,
+                nombre: z.nombre,
+                // Mapeo adicional por si el frontend espera otros campos
+                ip: z.ip_server || '0.0.0.0'
+            }));
+        } catch (error) {
+            return [];
+        }
+    },
+
+    async getAvailableIps(_routerId: string | number): Promise<string[]> {
+        // TODO: Endpoint de IPs no descubierto. Retornamos vacío para evitar errores 404 en consola.
+        // Se requiere documentación técnica precisa sobre "ips-disponibles".
+        console.warn('[WisphubService] Endpoint de IPs disponibles no encontrado. Retornando lista vacía.');
+        return [];
+        /* 
+        try {
+            if (!routerId) return [];
+            const response = await safeFetch(`${BASE_URL}/ips-disponibles/?id_router=${routerId}`);
+            if (!response.ok) return [];
+            const data = await response.json();
+            return Array.isArray(data) ? data : (data.results || []);
+        } catch (error) {
+            console.error('[WisphubService] Error fetching available IPs:', error);
+            return [];
+        }
+        */
+    },
+
+    async getSectors(): Promise<any[]> {
+        try {
+            // INTENTO: Usar endpoint de zonas también para sectores o buscar dentro de zonas
+            // Por ahora mapeamos zonas como sectores también para que no esté vacío el select
+            const response = await safeFetch(`${BASE_URL}/zonas/?limit=1000`);
+            if (!response.ok) return [];
+            const data = await response.json();
+            return (data.results || []).map((z: any) => ({
+                id: z.id,
+                id_sector: z.id,
+                nombre: z.nombre,
+                nombre_sector: z.nombre
+            }));
+        } catch (error) {
+            return [];
+        }
+    },
+
+    async createInstallation(installationData: any): Promise<{ success: boolean; data?: any; message?: string }> {
+        try {
+            // Validar que tengamos el ID de zona (id_router en nuestro caso representa la zona)
+            if (!installationData.id_zona && !installationData.id_router) {
+                return { success: false, message: 'ID de zona es obligatorio' };
+            }
+
+            const zonaId = installationData.id_zona || installationData.id_router;
+
+            // Mapeo de campos según documentación oficial de WispHub
+            const payload = {
+                // Datos de conexión (OBLIGATORIOS)
+                ip: installationData.ip || '',
+                plan_internet: installationData.plan_internet || installationData.id_plan,
+
+                // Datos de hardware
+                // FALLBACK: Si no hay MAC, enviar 00:00:00:00:00:00 para pasar validación de API
+                mac_cpe: installationData.mac_cpe || installationData.mac || '00:00:00:00:00:00',
+                sn_onu: installationData.sn_onu || installationData.sn || '',
+
+                // Datos del cliente
+                nombre: installationData.nombre || '',
+                apellidos: installationData.apellidos || installationData.apellido || '',
+                email: installationData.email || '',
+                cedula: installationData.cedula || installationData.dni || '',
+                telefono: installationData.telefono || '',
+                direccion: installationData.direccion || '',
+                localidad: installationData.localidad || installationData.barrio || '',
+                ciudad: installationData.ciudad || 'Soledad',
+
+                // Coordenadas GPS
+                coordenadas: installationData.coordenadas || (installationData.gps_latitud && installationData.gps_longitud
+                    ? `${installationData.gps_latitud},${installationData.gps_longitud}`
+                    : ''),
+
+                // Datos de autenticación PPPoE
+                // CORRECCIÓN: Usuario RB = Nombre + Apellido (para Simple Queue / PPPoE)
+                // Para Cola Simple, la contraseña va vacía.
+                usuario_rb: installationData.usuario_rb || `${installationData.nombre || ''} ${installationData.apellidos || installationData.apellido || ''}`.trim(),
+                password_rb: installationData.password_rb || '',
+
+                // Datos de instalación
+                forma_contratacion: installationData.forma_contratacion || 3, // 3 = Oficina (default)
+                costo_instalacion: installationData.costo_instalacion || installationData.costo || '0',
+                estado_instalacion: installationData.estado_instalacion || 2, // 2 = En Progreso
+                comentarios: installationData.comentarios || installationData.comentario || ''
+            };
+
+            console.log('[WispHub] Payload de instalación enviado:', JSON.stringify(payload, null, 2));
+
+            // Endpoint correcto según documentación: /clientes/agregar-cliente/{id_zona}/?instalacion
+            const url = `${BASE_URL}/clientes/agregar-cliente/${zonaId}/?instalacion`;
+            console.log('[WispHub] URL de instalación:', url);
+
+            const response = await safeFetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                console.log('[WispHub] Instalación creada exitosamente:', data);
+                return { success: true, data };
+            } else {
+                let errorDetail = 'Sin detalles';
+                try {
+                    const errorBody = await response.text();
+                    errorDetail = errorBody;
+                    console.error('[WispHub] Error HTTP', response.status, ':', errorBody);
+                } catch (parseError) {
+                    console.error('[WispHub] No se pudo leer el cuerpo del error');
+                }
+                return {
+                    success: false,
+                    message: `HTTP ${response.status}: ${errorDetail.substring(0, 200)}`
+                };
+            }
+        } catch (error: any) {
+            console.error('[WispHub] Error de red o excepción:', error);
+            return { success: false, message: error.message || 'Error desconocido' };
+        }
+    },
+
+    // Método legacy de createClient - redirigir al método correcto
+    async createClient(clientData: any): Promise<{ success: boolean; data?: any; message?: string }> {
+        return this.createInstallation(clientData);
+    },
+
+    async getInvoices(serviceId: number): Promise<any[]> {
+        try {
+            const url = `${BASE_URL}/facturas/?id_servicio=${serviceId}&limit=50&ordering=-id`;
+            const response = await safeFetch(url);
+            if (!response.ok) return [];
+            const data = await response.json();
+            return data.results || [];
+        } catch (error) {
+            console.error("[WispHub] Error fetching invoices:", error);
+            return [];
+        }
+    },
+
+    async getTickets(serviceId: number, _clientName?: string, cedula?: string): Promise<any[]> {
         try {
             const currentSId = String(serviceId);
             const targetCedula = String(cedula || "").trim();
-            const cleanName = (clientName || '').split(' (')[0].trim();
 
-            // 1. OBTENER IDs HISTÓRICOS DESDE FACTURAS
             let historicalSIds = new Set<string>([currentSId]);
             try {
-                const invoices = await this.getInvoices(serviceId, clientName);
+                const invoices = await this.getInvoices(serviceId);
                 invoices.forEach(inv => {
                     if (inv.servicio?.id_servicio) historicalSIds.add(String(inv.servicio.id_servicio));
                     else if (inv.servicio) historicalSIds.add(String(inv.servicio));
                 });
             } catch (e) { /* ignore */ }
 
-            // 2. BUSCAR SOLO POR ID Y CÉDULA (Eliminamos búsqueda por nombre)
             const queries = Array.from(historicalSIds).map(id => `${BASE_URL}/tickets/?search=${id}&limit=50`);
             if (targetCedula.length > 5) {
                 queries.push(`${BASE_URL}/tickets/?search=${targetCedula}&limit=50`);
@@ -220,7 +432,6 @@ export const WisphubService = {
                 queries.slice(0, 10).map(url => safeFetch(url).then(res => res.ok ? res.json() : { results: [] }))
             );
 
-            // 3. UNIFICAR Y FILTRAR
             let allFound: any[] = [];
             results.forEach(data => { if (data.results) allFound = [...allFound, ...data.results]; });
 
@@ -230,48 +441,139 @@ export const WisphubService = {
             mapped.forEach(t => {
                 const isIdMatch = historicalSIds.has(String(t.servicio));
                 const isCedulaMatch = targetCedula.length > 5 && targetCedula === String(t.cedula).trim();
-
-                // Solo permitimos coincidencias por ID exacto de servicio o Cédula exacta
                 if (isIdMatch || isCedulaMatch) {
                     uniqueMap.set(t.id, t);
                 }
             });
 
-            const final = Array.from(uniqueMap.values()).sort((a: any, b: any) => Number(b.id) - Number(a.id));
-            console.log(`[WispHub] Recuperados ${final.length} tickets (Filtrado Estricto ID/Cédula) para ${cleanName}`);
-            return final;
+            return Array.from(uniqueMap.values()).sort((a: any, b: any) => Number(b.id) - Number(a.id));
         } catch (error) {
             console.error("[WispHub] Error en historial:", error);
             return [];
         }
     },
 
-    async getAllTickets(onProgress?: (current: number, total: number) => void): Promise<any[]> {
+    async getTicketSubjects(): Promise<string[]> {
+        if (SUBJECTS_FETCH_FAILED) return TICKET_SUBJECTS;
         try {
-            let allResults: any[] = [];
-            const pageSize = 100;
-            let currentOffset = 0;
-            let totalCount = 0;
+            // Probamos primero sin barra final (más común) y en modo SILENCIOSO
+            let response = await safeFetch(`${BASE_URL}/asuntos-tickets`, {
+                headers: { 'Accept': 'application/json' }
+            }, 0, true);
 
-            while (true) {
-                const url = `${BASE_URL}/tickets/?limit=${pageSize}&offset=${currentOffset}&id_estado=1&ordering=-id`;
-                const response = await safeFetch(url);
-                if (!response.ok) break;
-
-                const data = await response.json();
-                const results = data.results || [];
-                if (currentOffset === 0) totalCount = data.count || 0;
-
-                results.forEach((t: any) => {
-                    allResults.push(this.mapTicket(t));
-                });
-
-                if (onProgress) onProgress(allResults.length, totalCount);
-                if (results.length === 0 || allResults.length >= totalCount) break;
-                currentOffset += results.length;
+            // Si falla, probamos con barra final, también silencioso
+            if (!response.ok) {
+                response = await safeFetch(`${BASE_URL}/asuntos-tickets/`, {
+                    headers: { 'Accept': 'application/json' }
+                }, 0, true);
             }
-            return allResults;
+
+            if (!response || !response.ok) {
+                SUBJECTS_FETCH_FAILED = true;
+                console.info('[WispHub] Usando catálogo de asuntos local (API no disponible).');
+                return TICKET_SUBJECTS;
+            }
+
+            const data = await response.json();
+
+            // Validar que los datos sean JSON y no una página HTML
+            if (typeof data !== 'object' || data === null) {
+                console.warn('[WispHub] Subjects API returned non-JSON data, using fallbacks.');
+                return TICKET_SUBJECTS;
+            }
+
+            const results = data.results || data || [];
+            if (!Array.isArray(results) || results.length === 0) return TICKET_SUBJECTS;
+
+            const subjects = Array.from(new Set(results.map((s: any) => s.nombre || s.asunto || s)))
+                .filter(Boolean)
+                .sort() as string[];
+
+            return subjects.length > 0 ? subjects : TICKET_SUBJECTS;
         } catch (error) {
+            return TICKET_SUBJECTS;
+        }
+    },
+
+    async getAllTickets(filters?: { startDate?: string; endDate?: string; status?: string }, onProgress?: (current: number, total: number) => void): Promise<any[]> {
+        try {
+            // Asegurar que el staff esté cargado para mapear nombres reales
+            await this.getStaff();
+
+            const pageSize = 50;
+            let baseUrl = `${BASE_URL}/tickets/?limit=50&offset=0&ordering=-id`;
+
+            if (filters?.startDate || filters?.endDate) {
+                const start = filters.startDate || '2024-01-01';
+                const end = filters.endDate || new Date().toISOString().split('T')[0];
+                baseUrl += `&fecha_creacion_0=${start}&fecha_creacion_1=${end}`;
+            } else {
+                const past = new Date();
+                past.setDate(past.getDate() - 30);
+                const start = past.toISOString().split('T')[0];
+                const end = new Date().toISOString().split('T')[0];
+                baseUrl += `&fecha_creacion_0=${start}&fecha_creacion_1=${end}`;
+            }
+
+            if (filters?.status) baseUrl += `&id_estado=${filters.status}`;
+
+            console.log(`[REQUEST] URL: ${baseUrl}`);
+            const firstResponse = await safeFetch(baseUrl);
+            console.log(`[RESPONSE] Status: ${firstResponse.status} for URL: ${baseUrl}`);
+
+            if (!firstResponse.ok) return [];
+
+            const firstData = await firstResponse.json();
+            const totalCount = firstData.count || 0;
+            const uniqueTicketsMap = new Map<string, any>();
+
+            // Procesar primera página
+            (firstData.results || []).forEach((t: any) => {
+                const mapped = this.mapTicket(t);
+                // Filtrar localmente si se solicitó un estado
+                if (!filters?.status || String(mapped.id_estado) === String(filters.status)) {
+                    uniqueTicketsMap.set(mapped.id, mapped);
+                }
+            });
+
+            if (onProgress) onProgress(uniqueTicketsMap.size, totalCount);
+
+            // Si ya tenemos suficientes o no hay más qué pedir
+            if (uniqueTicketsMap.size >= totalCount || uniqueTicketsMap.size >= 1000) return Array.from(uniqueTicketsMap.values());
+
+            const remainingOffsets = [];
+            for (let offset = pageSize; offset < totalCount && offset < 1000; offset += pageSize) {
+                remainingOffsets.push(offset);
+            }
+
+            for (const offset of remainingOffsets) {
+                const pageUrl = baseUrl.replace('offset=0', `offset=${offset}`);
+                const response = await safeFetch(pageUrl);
+                if (response.ok) {
+                    const data = await response.json();
+                    console.log(`[RESPONSE] Offset ${offset} - Total Page Results: ${data.results?.length || 0}`);
+
+                    (data.results || []).forEach((t: any) => {
+                        const mapped = this.mapTicket(t);
+                        // Filtrar localmente por estado y evitar duplicados
+                        if (!filters?.status || String(mapped.id_estado) === String(filters.status)) {
+                            uniqueTicketsMap.set(mapped.id, mapped);
+                        }
+                    });
+
+                    if (onProgress) onProgress(uniqueTicketsMap.size, totalCount);
+                }
+                await new Promise(r => setTimeout(r, 200));
+
+                // Limite de seguridad de 1000 tickets por estado
+                if (uniqueTicketsMap.size >= 1000) break;
+            }
+
+            const finalResults = Array.from(uniqueTicketsMap.values());
+            console.log(`[SUCCESS] WisphubService.getAllTickets finalizó con ${finalResults.length} tickets mapeados (Deduplicados y Filtrados).`);
+            return finalResults;
+        } catch (error) {
+            console.error("[WispHub] Error loading all tickets:", error);
             return [];
         }
     },
@@ -288,14 +590,18 @@ export const WisphubService = {
         let priorityKey = String(t.prioridad || '1');
         if (priorityTextToId[priorityKey]) priorityKey = String(priorityTextToId[priorityKey]);
 
-        let finalClientName = t.nombre_cliente || t.cliente_nombre || "Cliente Desconocido";
+        let finalClientName = t.nombre_cliente || t.cliente_nombre || "";
         let finalCedula = "";
 
+        // Intentar extraer de objetos anidados (cliente o servicio)
         const possibleClient = t.cliente || t.servicio;
         if (possibleClient && typeof possibleClient === 'object') {
-            finalClientName = possibleClient.nombre || possibleClient.client_name || finalClientName;
+            finalClientName = finalClientName || possibleClient.nombre || possibleClient.client_name || possibleClient.nombre_cliente || "";
             finalCedula = possibleClient.cedula || "";
         }
+
+        // Si sigue vacío, poner fallback
+        if (!finalClientName) finalClientName = "Cliente Desconocido";
 
         const serviceObj = typeof t.servicio === 'object' ? t.servicio : null;
         let finalServiceId = String(t.id_servicio || t.servicio || "0");
@@ -309,18 +615,30 @@ export const WisphubService = {
             finalAsunto = typeof t.asunto === 'object' ? (t.asunto.nombre || "Asunto") : String(t.asunto);
         }
 
-        // Lógica de Estado AXCES: Abierto, Suspendido, Resuelto, Cerrado
-        const statusText = String(t.estado || 'Nuevo');
+        const statusText = String(t.estado || t.nombre_estado || 'Nuevo');
         let finalNombreEstado = statusText;
-        let finalIdEstado = 1; // 1 = Abierto/Nuevo por defecto
+        let finalIdEstado = Number(t.id_estado);
 
-        const lowerStatus = statusText.toLowerCase();
-        if (lowerStatus.includes('cerrado') || lowerStatus.includes('resuelto')) {
-            finalIdEstado = 3;
-            finalNombreEstado = 'Cerrado';
-        } else if (lowerStatus.includes('progreso') || lowerStatus.includes('espera')) {
-            finalIdEstado = 2;
-            finalNombreEstado = 'En Progreso';
+        if (isNaN(finalIdEstado)) {
+            const lowerStatus = statusText.toLowerCase();
+            if (lowerStatus.includes('cerrado')) {
+                finalIdEstado = 4;
+                finalNombreEstado = 'Cerrado';
+            } else if (lowerStatus.includes('resuelto')) {
+                finalIdEstado = 3;
+                finalNombreEstado = 'Resuelto';
+            } else if (lowerStatus.includes('progreso') || lowerStatus.includes('espera')) {
+                finalIdEstado = 2;
+                finalNombreEstado = 'En Progreso';
+            } else {
+                finalIdEstado = 1;
+                finalNombreEstado = 'Abierto';
+            }
+        } else {
+            if (finalIdEstado === 4) finalNombreEstado = 'Cerrado';
+            else if (finalIdEstado === 3) finalNombreEstado = 'Resuelto';
+            else if (finalIdEstado === 2) finalNombreEstado = 'En Progreso';
+            else if (finalIdEstado === 1) finalNombreEstado = 'Abierto';
         }
 
         return {
@@ -334,21 +652,43 @@ export const WisphubService = {
             id_estado: finalIdEstado,
             servicio: finalServiceId,
             servicio_completo: serviceObj,
-            nombre_tecnico: t.nombre_tecnico || t.tecnico?.nombre || t.tecnico || "Sin asignar",
+            nombre_tecnico: (() => {
+                const techIdentifier = String(t.tecnico && typeof t.tecnico === 'object' ? (t.tecnico.usuario || t.tecnico.username || t.tecnico.email || t.tecnico.nombre) : t.tecnico || t.nombre_tecnico || "").toLowerCase().trim();
+                const techIdStr = String(t.tecnico_id || (t.tecnico && typeof t.tecnico === 'object' ? (t.tecnico.id || t.tecnico.id_usuario) : "")).trim();
+
+                let finalName = t.nombre_tecnico || (t.tecnico && typeof t.tecnico === 'object' ? t.tecnico.nombre : null) || "Sin asignar";
+
+                if (GLOBAL_STAFF_CACHE) {
+                    const found = GLOBAL_STAFF_CACHE.find(s =>
+                        (s.usuario && s.usuario.toLowerCase() === techIdentifier) ||
+                        (s.email && s.email.toLowerCase() === techIdentifier) ||
+                        (String(s.id) === techIdStr && techIdStr !== "") ||
+                        (s.nombre && s.nombre.toLowerCase() === techIdentifier)
+                    );
+                    if (found) finalName = found.nombre;
+                }
+                return finalName;
+            })(),
+            tecnico_id: t.tecnico_id || (t.tecnico && typeof t.tecnico === 'object' ? (t.tecnico.id || t.tecnico.id_usuario) : null),
+            tecnico_usuario: t.tecnico_usuario || (t.tecnico && typeof t.tecnico === 'object' ? (t.tecnico.usuario || t.tecnico.username) : null),
+            email_tecnico: t.email_tecnico || (t.tecnico && typeof t.tecnico === 'object' ? t.tecnico.email : null),
             horas_abierto: diffHours,
             sla_status: diffHours > 48 ? 'critico' : diffHours > 24 ? 'amarillo' : 'verde',
-            fecha_creacion: t.fecha_creacion || t.created_at || t.fecha
+            fecha_creacion: t.fecha_creacion || t.created_at || t.fecha,
+            creado_por: t.creado_por || t.created_by || null,
+            descripcion: t.descripcion || ''
         };
     },
 
     async getTicketDetail(id: string | number): Promise<any> {
+        const raw = await this.getTicketRaw(id);
+        return raw ? this.mapTicket(raw) : null;
+    },
+
+    async getTicketRaw(id: string | number): Promise<any> {
         try {
-            const response = await fetch(`${BASE_URL}/tickets/${id}/`);
-            if (response.ok) {
-                const data = await response.json();
-                return this.mapTicket(data);
-            }
-            return null;
+            const response = await safeFetch(`${BASE_URL}/tickets/${id}/`);
+            return response.ok ? await response.json() : null;
         } catch (e) {
             return null;
         }
@@ -392,43 +732,21 @@ export const WisphubService = {
 
     async getClientBalance(serviceId: number | string): Promise<number> {
         try {
-            // 1. Try with the provided ID
             const response = await safeFetch(`${BASE_URL}/clientes/${serviceId}/saldo/`);
             let saldo = 0;
             if (response.ok) {
                 const data = await response.json();
                 saldo = Number(data.saldo || 0);
-                if (saldo > 0) return saldo;
             }
-
-            // 2. Fallback: If saldo is 0 but the ID looks like a Cedula (long number)
-            // or if we simply want to be sure, try searching by Cedula to find the real service ID
-            const idStr = String(serviceId);
-            if (idStr.length >= 7) { // Likely a Cedula, not a Service ID
-                const searchRes = await safeFetch(`${BASE_URL}/clientes/?cedula=${idStr}`);
-                if (searchRes.ok) {
-                    const searchData = await searchRes.json();
-                    const realClient = (searchData.results || [])[0];
-                    if (realClient?.id_servicio && String(realClient.id_servicio) !== idStr) {
-                        const realRes = await safeFetch(`${BASE_URL}/clientes/${realClient.id_servicio}/saldo/`);
-                        if (realRes.ok) {
-                            const realData = await realRes.json();
-                            return Number(realData.saldo || 0);
-                        }
-                    }
-                }
-            }
-
             return saldo;
         } catch (e) {
-            console.error("[WispHub Balance] Critical Error:", e);
             return 0;
         }
     },
 
     async getTicketComments(ticketId: string | number): Promise<any[]> {
         try {
-            const response = await safeFetch(`${BASE_URL}/tickets-comentarios/?ticket=${ticketId}`);
+            const response = await safeFetch(`${BASE_URL}/tickets/comentarios/?ticket=${ticketId}`);
             if (!response.ok) return [];
             const data = await response.json();
             return data.results || data || [];
@@ -437,12 +755,44 @@ export const WisphubService = {
         }
     },
 
-    async addTicketComment(ticketId: string | number, comment: string): Promise<boolean> {
+    async addTicketComment(ticketId: string | number, comment: string, file?: File | Blob): Promise<boolean> {
         try {
             const formData = new FormData();
             formData.append('ticket', String(ticketId));
             formData.append('comentario', comment);
-            const response = await safeFetch(`${BASE_URL}/tickets-comentarios/`, { method: 'POST', body: formData });
+            if (file) formData.append('archivo', file);
+            const response = await safeFetch(`${BASE_URL}/tickets/comentarios/`, {
+                method: 'POST',
+                body: formData
+            });
+            return response.ok;
+        } catch (e) {
+            return false;
+        }
+    },
+
+    async updateTicket(ticketId: string | number, data: any, method: 'PATCH' | 'PUT' = 'PATCH'): Promise<boolean> {
+        try {
+            let payload = data;
+            const hasFile = data.archivo_ticket instanceof File || data.archivo_ticket instanceof Blob;
+            if (!data.asunto && !data.servicio && !hasFile) {
+                payload = {
+                    tecnico: data.tecnico,
+                    email_tecnico: data.email_tecnico,
+                    estado: data.estado,
+                    prioridad: data.prioridad,
+                    descripcion: data.descripcion ? stripHtml(data.descripcion) : undefined
+                };
+            }
+            const response = await safeFetch(`${BASE_URL}/tickets/${ticketId}/`, {
+                method: method,
+                headers: hasFile ? {} : { 'Content-Type': 'application/json' },
+                body: hasFile ? (() => {
+                    const fd = new FormData();
+                    Object.keys(payload).forEach(k => fd.append(k, payload[k]));
+                    return fd;
+                })() : JSON.stringify(payload)
+            });
             return response.ok;
         } catch (e) {
             return false;
@@ -472,43 +822,86 @@ export const WisphubService = {
         descripcion: string;
         prioridad: number;
         technicianId?: string;
+        file?: File | Blob;
     }): Promise<any> {
         try {
-            const body = {
+            // 1. Resolver ID numérico del técnico (WispHub lo exige en POST/PUT)
+            let finalTechId: string | number = ticketData.technicianId || 'admin@rapilink-sas';
+
+            try {
+                const staff = await this.getStaff();
+                const found = staff.find(s =>
+                    s.usuario === ticketData.technicianId ||
+                    s.email === ticketData.technicianId ||
+                    s.id === ticketData.technicianId
+                );
+                if (found && found.id) {
+                    finalTechId = found.id;
+                }
+            } catch (staffErr) {
+                console.warn("[WispHub] No se pudo resolver ID numérico, usando fallback:", staffErr);
+            }
+
+            // 2. Safe Subject Logic (WispHub is strict with catalogs)
+            const staffSubjects = await this.getTicketSubjects();
+            const originalSubject = ticketData.asunto;
+            const isAsuntoValid = staffSubjects.some(s => s.toLowerCase() === originalSubject.toLowerCase());
+            const safeSubject = isAsuntoValid ? originalSubject : (staffSubjects[0] || "Internet Lento");
+
+            const payload: any = {
                 servicio: ticketData.servicio,
-                asunto: `CRM - Report - ${ticketData.asunto}`,
-                asuntos_default: ticketData.asunto,
+                asunto: `CRM - Report - ${originalSubject}`,
+                asuntos_default: safeSubject,
                 descripcion: ticketData.descripcion,
                 prioridad: ticketData.prioridad.toString(),
                 estado: '1',
-                tecnico: ticketData.technicianId || 1408762,
-                departamento: 'Administrativo',
-                departamentos_default: 'Administrativo'
+                tecnico: finalTechId,
+                departamento: 'Soporte Técnico',
+                departamentos_default: 'Soporte Técnico'
             };
+
+            if (ticketData.file) {
+                payload.archivo_ticket = ticketData.file;
+            }
+
+            console.log("[WispHub REQUEST] Create Ticket Payload:", { ...payload, archivo_ticket: payload.archivo_ticket ? 'File attached' : 'No file' });
+
+            const hasFile = !!ticketData.file;
             const response = await safeFetch(`${BASE_URL}/tickets/`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body)
+                headers: hasFile ? {} : { 'Content-Type': 'application/json' },
+                body: hasFile ? (() => {
+                    const fd = new FormData();
+                    Object.keys(payload).forEach(k => {
+                        if (payload[k] !== undefined && payload[k] !== null) {
+                            fd.append(k, payload[k]);
+                        }
+                    });
+                    return fd;
+                })() : JSON.stringify(payload)
             });
-            return response.ok ? { success: true } : { success: false, message: await response.text() };
+
+            if (response.ok) {
+                return { success: true };
+            } else {
+                const errorText = await response.text();
+                console.error("[WispHub API ERROR Response]", errorText);
+                return { success: false, message: errorText };
+            }
         } catch (error: any) {
             return { success: false, message: error.message };
         }
     },
 
-    async getAllRecentTickets(limit: number = 50): Promise<any[]> {
+    async getAllRecentTickets(limit: number = 1000, daysBack: number = 60): Promise<any[]> {
         try {
-            // Traemos los últimos tickets, pero priorizamos los que no están cerrados
-            // id_estado=1 (Nuevo), id_estado=2 (En Progreso)
-            const url = `${BASE_URL}/tickets/?limit=${limit}&ordering=-id&id_estado__in=1,2`;
+            const pastDate = new Date();
+            pastDate.setDate(pastDate.getDate() - daysBack);
+            const start = pastDate.toISOString().split('T')[0];
+            const end = new Date().toISOString().split('T')[0];
+            const url = `${BASE_URL}/tickets/?limit=${limit}&ordering=-id&fecha_creacion_0=${start}&fecha_creacion_1=${end}`;
             const response = await safeFetch(url);
-            if (!response.ok) {
-                // Si el filtro __in falla (depende de la versión de la API), intentamos el genérico
-                const fallbackRes = await safeFetch(`${BASE_URL}/tickets/?limit=${limit}&ordering=-id`);
-                if (!fallbackRes.ok) return [];
-                const fallbackData = await fallbackRes.json();
-                return (fallbackData.results || []).map((t: any) => this.mapTicket(t));
-            }
+            if (!response.ok) return [];
             const data = await response.json();
             return (data.results || []).map((t: any) => this.mapTicket(t));
         } catch (error) {
@@ -516,46 +909,124 @@ export const WisphubService = {
         }
     },
 
-    async getInvoices(serviceId: number, clientName?: string): Promise<any[]> {
+    async getMyTickets(limit: number = 100, daysBack: number = 0, tecnico?: string): Promise<any[]> {
         try {
-            let allResults: any[] = [];
-            const targetCedula = clientName?.match(/\((\d+)\)/)?.[1];
-            const cleanTargetName = (clientName || '').toLowerCase().split(' (')[0].trim();
-            for (let i = 0; i < 5; i++) {
-                const url = `${BASE_URL}/facturas/?fecha_emision__range_0=2021-01-01&limit=500&offset=${i * 500}&ordering=-id`;
-                const res = await safeFetch(url);
-                if (!res.ok) break;
-                const data = await res.json();
-                const results = data.results || [];
-                if (results.length === 0) break;
-                const filtered = results.filter((inv: any) => {
-                    const invCedula = String(inv.cliente?.cedula || '');
-                    const invName = (inv.cliente?.nombre || '').toLowerCase();
-                    const invSId = String(inv.servicio?.id_servicio || inv.servicio || '');
-                    if (targetCedula && invCedula === targetCedula) return true;
-                    if (String(serviceId) === invCedula || String(serviceId) === invSId) return true;
-                    if (cleanTargetName && invName.includes(cleanTargetName)) return true;
-                    return false;
-                });
-                allResults = [...allResults, ...filtered];
-                if (allResults.length >= 12) break;
-                if (results.length < 500) break;
+            let dateParams = '';
+            if (daysBack > 0) {
+                const pastDate = new Date();
+                pastDate.setDate(pastDate.getDate() - daysBack);
+                const start = pastDate.toISOString().split('T')[0];
+                const end = new Date().toISOString().split('T')[0];
+                dateParams = `&fecha_creacion_0=${start}&fecha_creacion_1=${end}`;
             }
-            const unique = Array.from(new Map(allResults.map(inv => [inv.id_factura, inv])).values());
-            return unique.sort((a, b) => b.id_factura - a.id_factura);
-        } catch (e) {
+            const tecnicoParam = tecnico ? `&tecnico=${encodeURIComponent(tecnico)}` : '&mis_tickets=true';
+            const url = `${BASE_URL}/tickets/?limit=${limit}&ordering=-id${tecnicoParam}${dateParams}`;
+            const response = await safeFetch(url);
+            if (!response.ok) return [];
+            const data = await response.json();
+            return (data.results || []).map((t: any) => this.mapTicket(t));
+        } catch (error) {
             return [];
         }
     },
 
-    async getPayments(serviceId: number): Promise<any[]> {
+    async getTicketsByTechnician(technicianId: number | string, page: number = 1): Promise<any[]> {
         try {
-            const res = await safeFetch(`${BASE_URL}/pagos/?id_servicio=${serviceId}&limit=100&ordering=-id`);
-            if (!res.ok) return [];
-            const data = await res.json();
-            return (data.results || []).filter((p: any) => String(p.servicio?.id_servicio || p.servicio) === String(serviceId));
-        } catch (e) {
+            const limit = 100;
+            const offset = (page - 1) * limit;
+            const url = `${BASE_URL}/tickets/?tecnico=${technicianId}&limit=${limit}&offset=${offset}&ordering=-id`;
+            const response = await safeFetch(url);
+            if (!response.ok) return [];
+            const data = await response.json();
+            return (data.results || []).map((t: any) => this.mapTicket(t));
+        } catch (error) {
             return [];
+        }
+    },
+
+    async getAllTicketsPage(page: number = 1, filters?: { startDate?: string; endDate?: string; tecnico?: string | number; status?: string | number }): Promise<{ results: any[], count: number }> {
+        try {
+            const limit = 50;
+            const offset = (page - 1) * limit;
+            let url = `${BASE_URL}/tickets/?limit=${limit}&offset=${offset}&ordering=-id`;
+
+            if (filters?.startDate && filters?.endDate) {
+                url += `&fecha_creacion_0=${filters.startDate}&fecha_creacion_1=${filters.endDate}`;
+            }
+            if (filters?.tecnico) {
+                url += `&tecnico=${filters.tecnico}`;
+            }
+            if (filters?.status) {
+                url += `&id_estado=${filters.status}`;
+            }
+
+            const response = await safeFetch(url);
+            if (!response.ok) return { results: [], count: 0 };
+            const data = await response.json();
+            return { results: (data.results || []).map((t: any) => this.mapTicket(t)), count: data.count || 0 };
+        } catch (error) {
+            return { results: [], count: 0 };
+        }
+    },
+
+    async getAllTicketsPaginated(maxPages: number = 30, daysBack: number = 60): Promise<any[]> {
+        // ... (existing implementation)
+        const allTickets: any[] = [];
+        let dateParams = '';
+        if (daysBack > 0) {
+            const pastDate = new Date();
+            pastDate.setDate(pastDate.getDate() - daysBack);
+            const start = pastDate.toISOString().split('T')[0];
+            const end = new Date().toISOString().split('T')[0];
+            dateParams = `&fecha_creacion_0=${start}&fecha_creacion_1=${end}`;
+        }
+
+        let nextUrl: string | null = `${BASE_URL}/tickets/?limit=100&ordering=-id${dateParams}`;
+        let pages = 0;
+
+        try {
+            while (nextUrl && pages < maxPages) {
+                const response = await safeFetch(nextUrl);
+                if (!response.ok) break;
+                const data = await response.json();
+                allTickets.push(...(data.results || []).map((t: any) => this.mapTicket(t)));
+                nextUrl = toProxyUrl(data.next);
+                pages++;
+            }
+            return allTickets;
+        } catch (e) {
+            return allTickets;
+        }
+    },
+
+    async uploadClientEvidence(clientId: string | number, file: Blob, description: string): Promise<boolean> {
+        try {
+            const formData = new FormData();
+            formData.append('id_servicio', String(clientId));
+            formData.append('archivo', file, `${description.replace(/\s+/g, '_')}.jpg`);
+            formData.append('descripcion', description);
+
+            console.log(`[WispHub] Uploading evidence: ${description} for client ${clientId}`);
+
+            // INTENTO 1: Endpoint de adjuntos/archivos (Probaremos rutas estándar)
+            // Ruta A: /clientes/archivos/ (General)
+            const response = await safeFetch(`${BASE_URL}/clientes/archivos/`, {
+                method: 'POST',
+                body: formData
+            });
+
+            if (response.ok) return true;
+
+            // INTENTO 2: Ruta B: /clientes/{id}/adjuntos/ (Específica)
+            const response2 = await safeFetch(`${BASE_URL}/clientes/${clientId}/adjuntos/`, {
+                method: 'POST',
+                body: formData
+            });
+
+            return response2.ok;
+        } catch (e) {
+            console.error('[WispHub] Error uploading evidence:', e);
+            return false;
         }
     }
 };

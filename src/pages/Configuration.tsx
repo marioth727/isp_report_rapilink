@@ -3,7 +3,18 @@ import { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
 import { createClient } from '@supabase/supabase-js';
 import clsx from 'clsx';
-import { Save, Plus, Trash2, DollarSign, Target, Calculator, UserPlus, Loader2 } from 'lucide-react';
+import {
+    Save,
+    Plus,
+    Trash2,
+    DollarSign,
+    Target,
+    Calculator,
+    UserPlus,
+    Loader2,
+    Camera
+} from 'lucide-react';
+import { InstallationChecklistManager } from '../components/InstallationChecklistManager';
 
 interface PlanPrice {
     id: string;
@@ -73,8 +84,10 @@ export function Configuration() {
     const [newUserPassword, setNewUserPassword] = useState('');
     const [newUserName, setNewUserName] = useState('');
     const [newUserWispHubId, setNewUserWispHubId] = useState('');
-    const [newUserOperationalLevel, setNewUserOperationalLevel] = useState(1);
+    const [newUserOperationalLevel, setNewUserOperationalLevel] = useState(0);
+    const [newUserIsFieldTech, setNewUserIsFieldTech] = useState(false);
     const [newUserAllowedMenus, setNewUserAllowedMenus] = useState<string[]>(["Dashboard"]);
+    const [newUserRole, setNewUserRole] = useState<'agente' | 'admin'>('agente');
     const [creatingUser, setCreatingUser] = useState(false);
 
     const [newPlanName, setNewPlanName] = useState('');
@@ -85,6 +98,8 @@ export function Configuration() {
     const [editingUserName, setEditingUserName] = useState('');
     const [editingWispHubId, setEditingWispHubId] = useState('');
     const [editingOperationalLevel, setEditingOperationalLevel] = useState(1);
+    const [editingIsFieldTech, setEditingIsFieldTech] = useState(false);
+    const [editingRole, setEditingRole] = useState<'agente' | 'admin'>('agente');
     const [editingAllowedMenus, setEditingAllowedMenus] = useState<string[]>([]);
     const [currentUser, setCurrentUser] = useState<any>(null);
 
@@ -93,8 +108,11 @@ export function Configuration() {
         "Escalamiento",
         "Gestión Operativa",
         "Gestión Comercial",
+        "Inventario",
         "Reportes"
     ];
+
+    // Opciones detalladas para asignar masivamente (opcional en UI, pero bueno tener la lista)
 
     const handleCreateUser = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -104,37 +122,35 @@ export function Configuration() {
             // Create a temporary client to avoid logging out the admin
             const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
             const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
-            const tempSupabase = createClient(supabaseUrl, supabaseAnonKey);
+            const tempSupabase = createClient(supabaseUrl, supabaseAnonKey, {
+                auth: { persistSession: false }
+            });
 
-            const { error } = await tempSupabase.auth.signUp({
+            const { data: authData, error } = await tempSupabase.auth.signUp({
                 email: newUserEmail,
                 password: newUserPassword,
                 options: {
                     data: {
                         full_name: newUserName,
-                        role: 'user'
+                        role: newUserRole
                     }
                 }
             });
 
             if (error) throw error;
 
-            // 2. Create Profile Record
-            if (error === null) {
-                // We need to wait a brief moment for the auth trigger if any, 
-                // but since we want specific data, we upsert manually.
-                const { data: signUpData } = await tempSupabase.auth.getSession();
-                const userId = signUpData?.session?.user?.id;
-
-                if (userId) {
-                    await supabase.from('profiles').upsert({
-                        id: userId,
-                        full_name: newUserName,
-                        wisphub_id: newUserWispHubId,
-                        operational_level: newUserOperationalLevel,
-                        allowed_menus: newUserAllowedMenus
-                    });
-                }
+            // 2. Create Profile Record using the NEW user ID
+            if (authData?.user?.id) {
+                const { error: profileError } = await supabase.from('profiles').upsert({
+                    id: authData.user.id,
+                    full_name: newUserName,
+                    wisphub_id: newUserWispHubId,
+                    operational_level: newUserOperationalLevel,
+                    is_field_tech: newUserIsFieldTech,
+                    allowed_menus: newUserAllowedMenus,
+                    role: newUserRole
+                });
+                if (profileError) throw profileError;
             }
 
             alert(`Usuario ${newUserName} creado exitosamente.`);
@@ -143,6 +159,8 @@ export function Configuration() {
             setNewUserName('');
             setNewUserWispHubId('');
             setNewUserOperationalLevel(1);
+            setNewUserIsFieldTech(false);
+            setNewUserRole('agente');
             setNewUserAllowedMenus(["Dashboard"]);
             fetchConfig();
         } catch (error: any) {
@@ -214,9 +232,45 @@ export function Configuration() {
         }
     };
 
+    const handleDeleteUser = async (userId: string, userName: string) => {
+        if (!window.confirm(`⚠️ ADVERTENCIA: ¿Estás seguro de que deseas eliminar a ${userName}? 
+Esta acción es IRREVERSIBLE y eliminará tanto su perfil como su cuenta de acceso (Auth) de Supabase.`)) {
+            return;
+        }
+
+        try {
+            // 1. Llamar a la función RPC para eliminar de Auth y Profiles de un solo golpe
+            const { error: rpcError } = await supabase.rpc('delete_user_by_admin', {
+                target_user_id: userId
+            });
+
+            if (rpcError) throw rpcError;
+
+            alert('Usuario y cuenta eliminados permanentemente con éxito.');
+            fetchConfig();
+        } catch (error: any) {
+            console.error('Error deleting user:', error);
+            alert('Error al eliminar usuario: ' + error.message);
+        }
+    };
+
+    const [editingEmail, setEditingEmail] = useState('');
+    const [editingPassword, setEditingPassword] = useState('');
+
+
     const handleUpdateUser = async (userId: string) => {
         try {
             const { data: { user: currentUser } } = await supabase.auth.getUser();
+
+            // 0. Update Credentials via RPC if provided
+            if (editingEmail || editingPassword) {
+                const { error: rpcError } = await supabase.rpc('update_user_credentials', {
+                    target_user_id: userId,
+                    new_email: editingEmail || null,
+                    new_password: editingPassword || null
+                });
+                if (rpcError) throw rpcError;
+            }
 
             // 1. Actualizar Tabla de Perfiles
             const { error: profileError } = await supabase
@@ -226,7 +280,9 @@ export function Configuration() {
                     full_name: editingUserName,
                     wisphub_id: editingWispHubId,
                     operational_level: editingOperationalLevel,
-                    allowed_menus: editingAllowedMenus
+                    is_field_tech: editingIsFieldTech,
+                    allowed_menus: editingAllowedMenus,
+                    role: editingRole
                 });
 
             if (profileError) throw profileError;
@@ -234,14 +290,20 @@ export function Configuration() {
             // 2. Si es el usuario actual, actualizar también Metadatos de Auth para consistencia inmediata
             if (currentUser && currentUser.id === userId) {
                 await supabase.auth.updateUser({
-                    data: { full_name: editingUserName }
+                    data: {
+                        full_name: editingUserName,
+                        role: editingRole
+                    }
                 });
             }
 
             alert('Usuario actualizado correctamente');
             setEditingUserId(null);
+            setEditingEmail('');
+            setEditingPassword('');
             fetchConfig();
         } catch (error: any) {
+            console.error('Update User Error:', error);
             alert('Error al actualizar: ' + error.message);
         }
     };
@@ -315,14 +377,14 @@ export function Configuration() {
 
     return (
         <div className="max-w-4xl mx-auto space-y-8 pb-12">
-            <div className="flex justify-between items-center">
+            <div className="flex justify-between items-center border-b border-slate-200 pb-6">
                 <div>
-                    <h2 className="text-3xl font-bold tracking-tight">Configuración</h2>
-                    <p className="text-muted-foreground">Define tus metas, precios y umbrales de calidad.</p>
+                    <h2 className="text-3xl font-black tracking-tight text-slate-900 uppercase">Configuración</h2>
+                    <p className="text-slate-500 font-medium">Define tus metas, precios y umbrales de calidad.</p>
                 </div>
                 <button
                     onClick={handleSave}
-                    className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg font-bold shadow-md transition-all active:scale-95"
+                    className="flex items-center gap-2 bg-blue-900 hover:bg-blue-800 text-white px-5 py-2.5 rounded-xl font-bold shadow-sm transition-all active:scale-95 text-sm uppercase tracking-wide"
                 >
                     <Save className="w-5 h-5" /> Guardar Cambios
                 </button>
@@ -332,42 +394,42 @@ export function Configuration() {
             <div className="grid gap-8 md:grid-cols-2">
 
                 {/* 1. Goals Section */}
-                <div className="bg-card p-6 rounded-xl border border-border shadow-sm space-y-6">
-                    <h3 className="text-xl font-semibold flex items-center gap-2">
-                        <Target className="w-5 h-5 text-indigo-500" /> Definición de Metas
+                <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-6">
+                    <h3 className="text-sm font-black flex items-center gap-2 uppercase text-slate-500 tracking-widest">
+                        <Target className="w-4 h-4 text-blue-600" /> Definición de Metas
                     </h3>
 
                     {/* Daily Goal */}
-                    <div className="p-4 bg-indigo-500/10 rounded-lg border border-indigo-500/20">
-                        <label className="text-sm font-bold text-indigo-300 block mb-2">Meta Diaria (Gestiones Exitosas)</label>
+                    <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
+                        <label className="text-xs font-bold text-slate-900 block mb-2 uppercase tracking-wide">Meta Diaria (Gestiones)</label>
                         <div className="flex items-center gap-4">
                             <input
                                 type="number"
                                 value={config.dailyGoal}
                                 onChange={(e) => setConfig({ ...config, dailyGoal: Number(e.target.value) })}
-                                className="w-24 p-2 rounded-md border border-input bg-background font-bold text-center text-lg"
+                                className="w-24 p-2 rounded-lg border border-slate-200 bg-white font-black text-center text-xl text-slate-800 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all"
                             />
-                            <span className="text-sm text-muted-foreground">ventas / día</span>
+                            <span className="text-xs font-bold text-slate-400 uppercase">ventas / día</span>
                         </div>
                     </div>
 
                     {/* Weekly Goals per Category */}
                     <div>
                         <div className="flex justify-between items-center mb-4">
-                            <label className="text-sm font-bold">Metas Semanales por Categoría</label>
-                            <span className="text-xs bg-secondary px-2 py-1 rounded text-muted-foreground">
-                                Suma Total: <strong className="text-white">{totalWeeklyGoal}</strong>
+                            <label className="text-xs font-bold text-slate-900 uppercase">Metas Semanales</label>
+                            <span className="text-[10px] font-bold bg-blue-100/50 text-blue-700 px-2 py-1 rounded border border-blue-200 uppercase">
+                                Total: {totalWeeklyGoal}
                             </span>
                         </div>
                         <div className="space-y-3">
                             {config.weeklyGoals.map((goal) => (
                                 <div key={goal.name} className="flex items-center justify-between text-sm">
-                                    <span className="text-muted-foreground">{goal.name}</span>
+                                    <span className="text-slate-600 font-medium text-xs uppercase tracking-tight">{goal.name}</span>
                                     <input
                                         type="number"
                                         value={goal.target}
                                         onChange={(e) => handleCategoryChange(goal.name, e.target.value)}
-                                        className="w-20 p-1.5 rounded border border-input bg-background text-right"
+                                        className="w-20 p-1.5 rounded border border-slate-200 bg-slate-50 text-right font-bold text-slate-800 text-xs focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500 outline-none"
                                     />
                                 </div>
                             ))}
@@ -376,11 +438,11 @@ export function Configuration() {
                 </div>
 
                 {/* 2. Quality Thresholds (New Section) */}
-                <div className="bg-card p-6 rounded-xl border border-border shadow-sm space-y-6">
-                    <h3 className="text-xl font-semibold flex items-center gap-2">
-                        <Calculator className="w-5 h-5 text-yellow-500" /> Métricas de Calidad
+                <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-6">
+                    <h3 className="text-sm font-black flex items-center gap-2 uppercase text-slate-500 tracking-widest">
+                        <Calculator className="w-4 h-4 text-emerald-500" /> Métricas de Calidad
                     </h3>
-                    <p className="text-sm text-muted-foreground">
+                    <p className="text-xs text-slate-400 font-medium">
                         Define los umbrales para el semáforo de rendimiento.
                     </p>
 
@@ -394,25 +456,25 @@ export function Configuration() {
                             { id: 'arpu', label: 'ARPU (Ticket Promedio)', suffix: '$' },
                         ].map((metric) => (
                             <div key={metric.id} className="grid grid-cols-12 gap-2 items-center text-sm">
-                                <span className="col-span-4 text-muted-foreground font-medium">{metric.label}</span>
+                                <span className="col-span-4 text-slate-600 font-bold text-xs uppercase tracking-tight">{metric.label}</span>
 
                                 <div className="col-span-8 grid grid-cols-2 gap-2">
                                     <div className="flex flex-col gap-1">
-                                        <label className="text-[10px] text-green-500 font-bold uppercase">Óptimo {'>'}</label>
+                                        <label className="text-[9px] text-emerald-600 font-black uppercase tracking-wide">Óptimo {'>'}</label>
                                         <input
                                             type="number"
                                             value={config.thresholds[metric.id as keyof TrafficLightConfig].optimal}
                                             onChange={(e) => handleThresholdChange(metric.id as keyof TrafficLightConfig, 'optimal', e.target.value)}
-                                            className="w-full p-1.5 rounded border border-green-500/30 bg-background text-center"
+                                            className="w-full p-1.5 rounded border border-emerald-100 bg-emerald-50/30 text-center font-bold text-emerald-700 text-xs focus:ring-1 focus:ring-emerald-500 outline-none"
                                         />
                                     </div>
                                     <div className="flex flex-col gap-1">
-                                        <label className="text-[10px] text-yellow-500 font-bold uppercase">Alerta {'>'}</label>
+                                        <label className="text-[9px] text-amber-600 font-black uppercase tracking-wide">Alerta {'>'}</label>
                                         <input
                                             type="number"
                                             value={config.thresholds[metric.id as keyof TrafficLightConfig].alert}
                                             onChange={(e) => handleThresholdChange(metric.id as keyof TrafficLightConfig, 'alert', e.target.value)}
-                                            className="w-full p-1.5 rounded border border-yellow-500/30 bg-background text-center"
+                                            className="w-full p-1.5 rounded border border-amber-100 bg-amber-50/30 text-center font-bold text-amber-700 text-xs focus:ring-1 focus:ring-amber-500 outline-none"
                                         />
                                     </div>
                                 </div>
@@ -422,69 +484,82 @@ export function Configuration() {
                 </div>
 
                 {/* 3. Plan Prices Section */}
-                <div className="bg-card p-6 rounded-xl border border-border shadow-sm space-y-4 md:col-span-2">
-                    <h3 className="text-xl font-semibold flex items-center gap-2">
-                        <DollarSign className="w-5 h-5 text-green-500" /> Catálogo de Precios
+                <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4 md:col-span-2">
+                    <h3 className="text-sm font-black flex items-center gap-2 uppercase text-slate-500 tracking-widest">
+                        <DollarSign className="w-4 h-4 text-green-500" /> Catálogo de Precios
                     </h3>
-                    <p className="text-sm text-muted-foreground">
+                    <p className="text-xs text-slate-400 font-medium">
                         Ingresa el nombre EXACTO del plan (como aparece en el CRM) y su precio mensual para el cálculo de ARPU.
                     </p>
 
                     <div className="flex gap-2 items-end">
                         <div className="flex-1">
-                            <label className="text-xs font-medium mb-1 block">Nombre del Plan</label>
+                            <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Nombre del Plan</label>
                             <input
                                 placeholder="Ej: Plan 200 Megas"
                                 value={newPlanName}
                                 onChange={(e) => setNewPlanName(e.target.value)}
-                                className="w-full p-2 rounded-md border border-input bg-background text-sm"
+                                className="w-full p-2 rounded-lg border border-slate-200 bg-slate-50 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all placeholder:text-slate-400 font-medium"
                             />
                         </div>
-                        <div className="w-24">
-                            <label className="text-xs font-medium mb-1 block">Precio ($)</label>
+                        <div className="w-32">
+                            <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Precio ($)</label>
                             <input
                                 type="number"
                                 placeholder="50000"
                                 value={newPlanPrice}
                                 onChange={(e) => setNewPlanPrice(e.target.value)}
-                                className="w-full p-2 rounded-md border border-input bg-background text-sm"
+                                className="w-full p-2 rounded-lg border border-slate-200 bg-slate-50 text-sm text-right focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none font-bold"
                             />
                         </div>
                         <button
                             onClick={addPlan}
-                            className="p-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90"
+                            className="p-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800 shadow-sm transition-transform active:scale-95"
                         >
                             <Plus className="w-5 h-5" />
                         </button>
                     </div>
 
-                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 max-h-[300px] overflow-y-auto">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 max-h-[300px] overflow-y-auto custom-scrollbar">
                         {plans.map(plan => (
-                            <div key={plan.id} className="flex justify-between items-center p-3 bg-muted/30 rounded border border-border/50 text-sm">
-                                <span className="font-medium truncate mr-2">{plan.name}</span>
-                                <div className="flex items-center gap-2">
-                                    <span className="text-green-600 font-bold">
+                            <div key={plan.id} className="flex justify-between items-center p-3 bg-white rounded-xl border border-slate-200 hover:border-slate-300 shadow-sm transition-all text-sm group">
+                                <span className="font-bold text-slate-700 truncate mr-2 w-full text-xs uppercase" title={plan.name}>{plan.name}</span>
+                                <div className="flex items-center gap-2 shrink-0">
+                                    <span className="text-emerald-600 font-black text-xs">
                                         ${plan.price.toLocaleString()}
                                     </span>
                                     <button
                                         onClick={() => removePlan(plan.id)}
-                                        className="text-muted-foreground hover:text-red-500 transition-colors"
+                                        className="text-slate-300 hover:text-red-500 transition-colors"
                                     >
-                                        <Trash2 className="w-4 h-4" />
+                                        <Trash2 className="w-3.5 h-3.5" />
                                     </button>
                                 </div>
                             </div>
                         ))}
                     </div>
                 </div>
+
+                {/* 4. Installation Checklist (Dynamic) */}
+                <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4 md:col-span-2">
+                    <h3 className="text-sm font-black flex items-center gap-2 uppercase text-slate-500 tracking-widest">
+                        <Camera className="w-4 h-4 text-pink-500" /> Requisitos Fotográficos (Instalación)
+                    </h3>
+                    <p className="text-xs text-slate-400 font-medium">
+                        Define el checklist de fotos que el personal de cuadrilla debe registrar durante una instalación.
+                    </p>
+                    <div className="pt-2">
+                        <InstallationChecklistManager />
+                    </div>
+                </div>
             </div>
 
             {/* 4. User Management Section (Admin Only) */}
-            <div className="bg-card p-6 rounded-xl border border-border shadow-sm space-y-6">
-                <h3 className="text-xl font-semibold flex items-center gap-2">
-                    <UserPlus className="w-5 h-5 text-indigo-500" /> Gestión de Usuarios (Agentes)
+            <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-6">
+                <h3 className="text-sm font-black flex items-center gap-2 uppercase text-slate-500 tracking-widest">
+                    <UserPlus className="w-4 h-4 text-blue-600" /> Gestión de Usuarios (Agentes)
                 </h3>
-                <p className="text-sm text-muted-foreground">
+                <p className="text-xs text-slate-400 font-medium">
                     Crea nuevas cuentas de acceso para el personal. Estas cuentas tendrán rol de "Usuario" por defecto.
                 </p>
 
@@ -493,74 +568,98 @@ export function Configuration() {
                         {/* Basic Info */}
                         <div className="space-y-4">
                             <div>
-                                <label className="text-xs font-bold text-muted-foreground uppercase mb-1 block">Nombre Completo</label>
+                                <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Nombre Completo</label>
                                 <input
                                     type="text"
                                     value={newUserName}
                                     onChange={(e) => setNewUserName(e.target.value)}
-                                    className="w-full p-2.5 rounded-xl border border-input bg-background text-sm font-medium focus:ring-2 focus:ring-primary/20 transition-all"
+                                    className="w-full p-2.5 rounded-xl border border-slate-200 bg-slate-50 text-sm font-medium focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500 transition-all outline-none"
                                     placeholder="Ej. Ana García"
                                     required
                                 />
                             </div>
                             <div>
-                                <label className="text-xs font-bold text-muted-foreground uppercase mb-1 block">Correo Electrónico</label>
+                                <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Correo Electrónico</label>
                                 <input
                                     type="email"
                                     value={newUserEmail}
                                     onChange={(e) => setNewUserEmail(e.target.value)}
-                                    className="w-full p-2.5 rounded-xl border border-input bg-background text-sm font-medium focus:ring-2 focus:ring-primary/20 transition-all"
+                                    className="w-full p-2.5 rounded-xl border border-slate-200 bg-slate-50 text-sm font-medium focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500 transition-all outline-none"
                                     placeholder="agente@rapilink.com"
                                     required
                                 />
                             </div>
                             <div>
-                                <label className="text-xs font-bold text-muted-foreground uppercase mb-1 block">Contraseña Provisional</label>
+                                <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Contraseña Provisional</label>
                                 <input
                                     type="text"
                                     value={newUserPassword}
                                     onChange={(e) => setNewUserPassword(e.target.value)}
-                                    className="w-full p-2.5 rounded-xl border border-input bg-background text-sm font-medium focus:ring-2 focus:ring-primary/20 transition-all"
+                                    className="w-full p-2.5 rounded-xl border border-slate-200 bg-slate-50 text-sm font-medium focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500 transition-all outline-none"
                                     placeholder="Mínimo 6 caracteres"
                                     required
                                     minLength={6}
                                 />
+                            </div>
+                            <div>
+                                <label className="text-[10px] font-bold text-blue-600 uppercase mb-1 block">Rol del Sistema</label>
+                                <select
+                                    value={newUserRole}
+                                    onChange={(e) => setNewUserRole(e.target.value as 'agente' | 'admin')}
+                                    className="w-full p-2.5 rounded-xl border border-blue-200 bg-blue-50/50 text-sm font-bold focus:ring-2 focus:ring-blue-200 transition-all outline-none text-blue-900"
+                                >
+                                    <option value="agente">Agente (Consulta y CRM)</option>
+                                    <option value="admin">Administrador (Control Total)</option>
+                                </select>
                             </div>
                         </div>
 
                         {/* WispHub & Level */}
                         <div className="space-y-4">
                             <div>
-                                <label className="text-xs font-bold text-muted-foreground uppercase mb-1 block">Usuario WispHub (Mapping)</label>
+                                <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Usuario WispHub (Mapping)</label>
                                 <input
                                     type="text"
                                     value={newUserWispHubId}
                                     onChange={(e) => setNewUserWispHubId(e.target.value)}
-                                    className="w-full p-2.5 rounded-xl border border-input bg-background text-sm font-medium focus:ring-2 focus:ring-primary/20 transition-all"
+                                    className="w-full p-2.5 rounded-xl border border-slate-200 bg-slate-50 text-sm font-medium focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500 transition-all outline-none"
                                     placeholder="Ej. admin@rapilink-sas"
                                 />
                             </div>
                             <div>
-                                <label className="text-xs font-bold text-muted-foreground uppercase mb-1 block">Nivel Operativo</label>
+                                <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Nivel Operativo</label>
                                 <select
                                     value={newUserOperationalLevel}
                                     onChange={(e) => setNewUserOperationalLevel(Number(e.target.value))}
-                                    className="w-full p-2.5 rounded-xl border border-input bg-background text-sm font-bold focus:ring-2 focus:ring-primary/20 transition-all"
+                                    className="w-full p-2.5 rounded-xl border border-slate-200 bg-slate-50 text-sm font-bold focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500 transition-all outline-none"
                                 >
-                                    <option value={1}>Nivel 1 (Soporte Técnico)</option>
+                                    <option value={0}>Nivel 0 (Soporte Técnico)</option>
+                                    <option value={1}>Nivel 1 (Técnico de Redes)</option>
                                     <option value={2}>Nivel 2 (Supervisor)</option>
                                     <option value={3}>Nivel 3 (Jefe)</option>
                                     <option value={4}>Nivel 4 (Gerencia)</option>
                                 </select>
                             </div>
+                            <div className="flex items-center gap-2 p-3 bg-slate-50 border border-slate-200 rounded-xl">
+                                <input
+                                    type="checkbox"
+                                    id="newUserIsFieldTech"
+                                    checked={newUserIsFieldTech}
+                                    onChange={(e) => setNewUserIsFieldTech(e.target.checked)}
+                                    className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                                />
+                                <label htmlFor="newUserIsFieldTech" className="text-[10px] font-bold text-slate-600 uppercase cursor-pointer select-none">
+                                    Es Técnico de Campo (Cuadrilla)
+                                </label>
+                            </div>
                         </div>
 
                         {/* Permissions */}
-                        <div className="bg-muted/30 p-4 rounded-2xl border border-border/50">
-                            <label className="text-xs font-bold text-muted-foreground uppercase mb-3 block">Permisos de Menú</label>
+                        <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase mb-3 block">Permisos de Menú</label>
                             <div className="grid grid-cols-1 gap-2">
                                 {MENU_OPTIONS.map(menu => (
-                                    <label key={menu} className="flex items-center gap-3 text-xs cursor-pointer group p-1 hover:bg-white/50 rounded-lg transition-colors">
+                                    <label key={menu} className="flex items-center gap-3 text-xs cursor-pointer group p-1 hover:bg-white rounded-lg transition-colors">
                                         <input
                                             type="checkbox"
                                             checked={newUserAllowedMenus.includes(menu)}
@@ -571,9 +670,9 @@ export function Configuration() {
                                                     setNewUserAllowedMenus(newUserAllowedMenus.filter(m => m !== menu));
                                                 }
                                             }}
-                                            className="w-4 h-4 rounded border-border text-primary focus:ring-primary/20"
+                                            className="w-3.5 h-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
                                         />
-                                        <span className="font-medium group-hover:text-primary transition-colors">{menu}</span>
+                                        <span className="font-bold text-slate-700 group-hover:text-blue-600 transition-colors uppercase text-[10px] tracking-wide">{menu}</span>
                                     </label>
                                 ))}
                             </div>
@@ -583,7 +682,7 @@ export function Configuration() {
                     <div className="flex justify-end pt-2">
                         <button
                             disabled={creatingUser}
-                            className="bg-primary text-primary-foreground px-8 py-3 rounded-xl font-bold shadow-lg hover:bg-primary/90 transition-all active:scale-95 disabled:opacity-50 flex items-center gap-2"
+                            className="bg-blue-900 text-white px-8 py-3 rounded-xl font-bold shadow-sm hover:bg-blue-800 transition-all active:scale-95 disabled:opacity-50 flex items-center gap-2 text-xs uppercase tracking-widest"
                         >
                             {creatingUser ? <Loader2 className="w-5 h-5 animate-spin" /> : <UserPlus className="w-5 h-5" />}
                             {creatingUser ? 'Creando Usuario...' : 'Crear Cuenta Completa'}
@@ -592,61 +691,91 @@ export function Configuration() {
                 </form>
 
                 {/* Users List */}
-                <div className="mt-8 border-t border-border pt-6">
-                    <h4 className="text-sm font-bold uppercase tracking-wider text-muted-foreground mb-4">Usuarios Registrados</h4>
+                <div className="mt-8 border-t border-slate-200 pt-6">
+                    <h4 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-4">Usuarios Registrados</h4>
                     <div className="grid gap-3">
                         {users.map((user) => (
-                            <div key={user.id} className="flex items-center justify-between p-4 bg-muted/30 rounded-xl border border-border/50">
+                            <div key={user.id} className="flex items-center justify-between p-4 bg-slate-50 rounded-xl border border-slate-200 group hover:border-blue-300 transition-colors">
                                 <div className="flex flex-col">
                                     <div className="flex items-center gap-2 mb-1">
-                                        <span className="text-[10px] text-primary font-black uppercase bg-primary/10 px-2 py-0.5 rounded border border-primary/20">
+                                        <span className="text-[10px] text-blue-800 font-extrabold uppercase bg-blue-100 px-2 py-0.5 rounded border border-blue-200">
                                             {user.email || 'SIN EMAIL'}
                                         </span>
+                                        <span className={clsx(
+                                            "text-[10px] font-black uppercase px-2 py-0.5 rounded border shadow-sm",
+                                            user.role === 'admin' ? "bg-indigo-600 text-white border-indigo-700" : "bg-white text-slate-500 border-slate-200"
+                                        )}>
+                                            {user.role === 'admin' ? '🛡️ Admin' : '👤 Agente'}
+                                        </span>
                                         {user.id === currentUser?.id && (
-                                            <span className="text-[9px] font-black text-green-700 bg-green-100 px-2 py-0.5 rounded-full uppercase border border-green-200 shadow-sm">Tú</span>
+                                            <span className="text-[9px] font-black text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full uppercase border border-emerald-200 shadow-sm">Tú</span>
                                         )}
                                     </div>
                                     {editingUserId === user.id ? (
-                                        <div className="flex flex-col gap-2 mt-2">
+                                        <div className="flex flex-col gap-2 mt-2 bg-white p-4 rounded-xl border border-blue-200 shadow-sm">
                                             <div className="flex flex-col gap-1">
-                                                <label className="text-[9px] font-black text-muted-foreground uppercase">Nombre Completo</label>
+                                                <label className="text-[9px] font-black text-slate-400 uppercase">Nombre Completo</label>
                                                 <input
                                                     type="text"
                                                     value={editingUserName}
                                                     onChange={(e) => setEditingUserName(e.target.value)}
-                                                    className="p-1 px-2 rounded border border-primary bg-background text-sm font-bold"
+                                                    className="p-2 rounded-lg border border-slate-300 bg-white text-sm font-bold text-slate-800 outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
                                                     autoFocus
                                                     placeholder="Nombre completo..."
                                                 />
                                             </div>
                                             <div className="flex flex-col gap-1">
-                                                <label className="text-[9px] font-black text-muted-foreground uppercase">Usuario de WispHub (Mapping)</label>
+                                                <label className="text-[9px] font-black text-slate-400 uppercase">Usuario de WispHub (Mapping)</label>
                                                 <input
                                                     type="text"
                                                     value={editingWispHubId}
                                                     onChange={(e) => setEditingWispHubId(e.target.value)}
-                                                    className="p-1 px-2 rounded border border-border bg-background text-sm font-bold"
+                                                    className="p-2 rounded-lg border border-slate-300 bg-white text-sm font-bold outline-none"
                                                     placeholder="Ej. admin@rapilink-sas"
                                                 />
                                             </div>
+                                            <div className="grid grid-cols-2 gap-2">
+                                                <div className="flex flex-col gap-1">
+                                                    <label className="text-[9px] font-black text-blue-500 uppercase">Nuevo Correo</label>
+                                                    <input
+                                                        type="email"
+                                                        value={editingEmail}
+                                                        onChange={(e) => setEditingEmail(e.target.value)}
+                                                        className="p-2 rounded-lg border border-blue-200 bg-blue-50 text-sm font-bold outline-none"
+                                                        placeholder="Opcional"
+                                                    />
+                                                </div>
+                                                <div className="flex flex-col gap-1">
+                                                    <label className="text-[9px] font-black text-blue-500 uppercase">Nueva Clave</label>
+                                                    <input
+                                                        type="password"
+                                                        value={editingPassword}
+                                                        onChange={(e) => setEditingPassword(e.target.value)}
+                                                        className="p-2 rounded-lg border border-blue-200 bg-blue-50 text-sm font-bold outline-none"
+                                                        placeholder="Opcional"
+                                                        minLength={6}
+                                                    />
+                                                </div>
+                                            </div>
                                             <div className="flex flex-col gap-1">
-                                                <label className="text-[9px] font-black text-muted-foreground uppercase">Nivel Operativo</label>
+                                                <label className="text-[9px] font-black text-slate-400 uppercase">Nivel Operativo</label>
                                                 <select
                                                     value={editingOperationalLevel}
                                                     onChange={(e) => setEditingOperationalLevel(Number(e.target.value))}
-                                                    className="p-1 px-2 rounded border border-border bg-background text-sm font-bold"
+                                                    className="p-2 rounded-lg border border-slate-300 bg-white text-sm font-bold outline-none"
                                                 >
-                                                    <option value={1}>Nivel 1 (Soporte Técnico)</option>
+                                                    <option value={0}>Nivel 0 (Soporte Técnico)</option>
+                                                    <option value={1}>Nivel 1 (Técnico de Redes)</option>
                                                     <option value={2}>Nivel 2 (Supervisor de Operaciones)</option>
                                                     <option value={3}>Nivel 3 (Jefe de Operaciones)</option>
-                                                    <option value={4}>Nivel 4 (Gerencia)</option>
+                                                    <option value={4}>Nivel 4 (Gerente de Operaciones)</option>
                                                 </select>
                                             </div>
                                             <div className="flex flex-col gap-2 mt-2">
-                                                <label className="text-[9px] font-black text-muted-foreground uppercase">Permisos de Menú</label>
+                                                <label className="text-[9px] font-black text-slate-400 uppercase">Permisos de Menú</label>
                                                 <div className="grid grid-cols-2 gap-2">
                                                     {MENU_OPTIONS.map(menu => (
-                                                        <label key={menu} className="flex items-center gap-2 text-xs cursor-pointer group">
+                                                        <label key={menu} className="flex items-center gap-2 text-xs cursor-pointer group select-none">
                                                             <input
                                                                 type="checkbox"
                                                                 checked={editingAllowedMenus.includes(menu)}
@@ -657,9 +786,9 @@ export function Configuration() {
                                                                         setEditingAllowedMenus(editingAllowedMenus.filter(m => m !== menu));
                                                                     }
                                                                 }}
-                                                                className="rounded border-border text-primary focus:ring-primary/20"
+                                                                className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
                                                             />
-                                                            <span className="group-hover:text-primary transition-colors">{menu}</span>
+                                                            <span className="font-bold text-slate-600 group-hover:text-blue-600 transition-colors uppercase text-[10px]">{menu}</span>
                                                         </label>
                                                     ))}
                                                 </div>
@@ -667,23 +796,29 @@ export function Configuration() {
                                         </div>
                                     ) : (
                                         <div className="flex flex-col">
-                                            <span className="text-sm font-black uppercase text-foreground">{user.full_name || 'Sin Nombre'}</span>
+                                            <span className="text-sm font-black uppercase text-slate-800">{user.full_name || 'Sin Nombre'}</span>
                                             <div className="flex gap-2 items-center mt-1">
                                                 {user.wisphub_id && (
                                                     <span className="text-[9px] font-bold text-indigo-500 uppercase bg-indigo-50 px-1.5 rounded border border-indigo-100 italic">@{user.wisphub_id}</span>
                                                 )}
                                                 <span className={clsx(
                                                     "text-[9px] font-black px-1.5 rounded border uppercase",
-                                                    user.operational_level === 1 ? "bg-blue-50 text-blue-600 border-blue-200" :
-                                                        user.operational_level === 2 ? "bg-orange-50 text-orange-600 border-orange-200" :
-                                                            user.operational_level === 3 ? "bg-purple-50 text-purple-600 border-purple-200" :
-                                                                "bg-red-50 text-red-600 border-red-200"
+                                                    user.operational_level === 0 ? "bg-blue-50 text-blue-600 border-blue-200" :
+                                                        user.operational_level === 1 ? "bg-cyan-50 text-cyan-600 border-cyan-200" :
+                                                            user.operational_level === 2 ? "bg-orange-50 text-orange-600 border-orange-200" :
+                                                                user.operational_level === 3 ? "bg-purple-50 text-purple-600 border-purple-200" :
+                                                                    "bg-red-50 text-red-600 border-red-200"
                                                 )}>
-                                                    N{user.operational_level || 1}
+                                                    N{user.operational_level !== undefined ? user.operational_level : 0}
                                                 </span>
+                                                {user.is_field_tech && (
+                                                    <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-orange-100 text-orange-700 border border-orange-200 uppercase">
+                                                        🚜 Campo
+                                                    </span>
+                                                )}
                                                 <div className="flex flex-wrap gap-1 mt-1">
                                                     {(user.allowed_menus || ["Dashboard"]).map((m: string) => (
-                                                        <span key={m} className="text-[8px] bg-muted px-1 rounded text-muted-foreground font-medium">{m}</span>
+                                                        <span key={m} className="text-[8px] bg-white border border-slate-200 px-1 rounded text-slate-400 font-bold uppercase tracking-tight">{m}</span>
                                                     ))}
                                                 </div>
                                             </div>
@@ -692,33 +827,46 @@ export function Configuration() {
                                 </div>
                                 <div className="flex gap-2">
                                     {editingUserId === user.id ? (
-                                        <>
+                                        <div className="flex flex-col gap-2">
                                             <button
                                                 onClick={() => handleUpdateUser(user.id)}
-                                                className="px-3 py-1.5 bg-green-500 text-white text-[10px] font-black rounded-lg uppercase"
+                                                className="px-3 py-1.5 bg-emerald-500 text-white hover:bg-emerald-600 text-[10px] font-black rounded-lg uppercase shadow-sm transition-all"
                                             >
                                                 Guardar
                                             </button>
                                             <button
                                                 onClick={() => setEditingUserId(null)}
-                                                className="px-3 py-1.5 bg-muted text-muted-foreground text-[10px] font-black rounded-lg uppercase"
+                                                className="px-3 py-1.5 bg-slate-100 text-slate-500 hover:bg-slate-200 text-[10px] font-black rounded-lg uppercase transition-all"
                                             >
                                                 Cancelar
                                             </button>
-                                        </>
+                                        </div>
                                     ) : (
-                                        <button
-                                            onClick={() => {
-                                                setEditingUserId(user.id);
-                                                setEditingUserName(user.full_name || '');
-                                                setEditingWispHubId(user.wisphub_id || '');
-                                                setEditingOperationalLevel(user.operational_level || 1);
-                                                setEditingAllowedMenus(user.allowed_menus || ["Dashboard"]);
-                                            }}
-                                            className="px-3 py-1.5 bg-primary/10 text-primary hover:bg-primary/20 text-[10px] font-black rounded-lg uppercase transition-colors"
-                                        >
-                                            Editar Perfil
-                                        </button>
+                                        <div className="flex gap-2">
+                                            <button
+                                                onClick={() => {
+                                                    setEditingUserId(user.id);
+                                                    setEditingUserName(user.full_name || '');
+                                                    setEditingWispHubId(user.wisphub_id || '');
+                                                    setEditingOperationalLevel(user.operational_level !== undefined ? user.operational_level : 1);
+                                                    setEditingIsFieldTech(user.is_field_tech || false);
+                                                    setEditingRole(user.role === 'admin' ? 'admin' : 'agente');
+                                                    setEditingAllowedMenus(user.allowed_menus || ["Dashboard"]);
+                                                }}
+                                                className="px-3 py-1.5 bg-white border border-slate-200 text-slate-600 hover:text-blue-600 hover:border-blue-300 text-[10px] font-black rounded-lg uppercase transition-all shadow-sm"
+                                            >
+                                                Editar
+                                            </button>
+                                            {user.id !== currentUser?.id && (
+                                                <button
+                                                    onClick={() => handleDeleteUser(user.id, user.full_name || 'Agente')}
+                                                    className="px-3 py-1.5 bg-white border border-slate-200 text-slate-400 hover:text-red-500 hover:border-red-300 text-[10px] font-black rounded-lg uppercase transition-all shadow-sm"
+                                                    title="Eliminar Usuario"
+                                                >
+                                                    Eliminar
+                                                </button>
+                                            )}
+                                        </div>
                                     )}
                                 </div>
                             </div>
@@ -726,7 +874,7 @@ export function Configuration() {
                     </div>
                 </div>
             </div>
-        </div>
+        </div >
 
     );
 }

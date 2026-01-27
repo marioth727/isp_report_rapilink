@@ -52,3 +52,4 @@ temp_client.json
 *.sql
 !supabase_add_menu_permissions.sql
 !supabase_migration_workflow.sql
+!supabase_notifications_setup.sql

@@ -32,9 +32,9 @@ export function OperationsHub() {
         handleAutoSync();
     }, []);
 
-    const handleAutoSync = async () => {
+    const handleAutoSync = async (forceFull = false) => {
         setIsSyncing(true);
-        await WorkflowService.syncWithWispHub();
+        await WorkflowService.syncWithWispHub(forceFull);
         setIsSyncing(false);
         loadCurrentTabData();
     };
@@ -70,7 +70,7 @@ export function OperationsHub() {
                 .from('workflow_workitems')
                 .select('*, workflow_activities(name, process_id, workflow_processes(title, priority, process_type))')
                 .in('participant_id', identifiers.filter(Boolean))
-                .eq('status', 'Pending');
+                .eq('status', 'PE');
 
             if (!error) setMyTasks(data || []);
         } finally {
@@ -126,17 +126,32 @@ export function OperationsHub() {
                     </h1>
                     <p className="text-muted-foreground font-medium">Panel centralizado de productividad y escalamiento operativo.</p>
                 </div>
-                <button
-                    onClick={handleAutoSync}
-                    disabled={isSyncing}
-                    className={clsx(
-                        "px-5 py-3 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center gap-2 transition-all",
-                        isSyncing ? "bg-muted text-muted-foreground" : "bg-primary text-primary-foreground hover:shadow-lg hover:shadow-primary/20 active:scale-95"
-                    )}
-                >
-                    <RefreshCw size={16} className={isSyncing ? "animate-spin" : ""} />
-                    {isSyncing ? 'Sincronizando...' : 'Sincronizar WispHub'}
-                </button>
+                <div className="flex gap-2">
+                    <button
+                        onClick={() => handleAutoSync(false)}
+                        disabled={isSyncing}
+                        className={clsx(
+                            "px-5 py-3 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center gap-2 transition-all",
+                            isSyncing ? "bg-muted text-muted-foreground" : "bg-primary/10 text-primary hover:bg-primary/20 hover:shadow-lg active:scale-95"
+                        )}
+                        title="Sincronización rápida (últimos 7 días)"
+                    >
+                        <RefreshCw size={16} className={isSyncing ? "animate-spin" : ""} />
+                        {isSyncing ? "Sincronizando..." : "Rápida (7d)"}
+                    </button>
+                    <button
+                        onClick={() => handleAutoSync(true)}
+                        disabled={isSyncing}
+                        className={clsx(
+                            "px-5 py-3 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center gap-2 transition-all",
+                            isSyncing ? "bg-muted text-muted-foreground" : "bg-primary text-primary-foreground hover:shadow-lg hover:shadow-primary/20 active:scale-95"
+                        )}
+                        title="Sincronización TOTAL (Sin límite de fecha - Trae TODO el historial)"
+                    >
+                        <RefreshCw size={16} className={isSyncing ? "animate-spin" : ""} />
+                        {isSyncing ? "Descargando..." : "Total (∞)"}
+                    </button>
+                </div>
             </header>
 
             {/* TABS NAVEGACIÓN */}
@@ -317,7 +332,7 @@ export function OperationsHub() {
                                                         >
                                                             <option value="">Sin Asignar</option>
                                                             {platformUsers.map(u => (
-                                                                <option key={u.id} value={u.email || u.id}>{u.full_name || u.email}</option>
+                                                                <option key={u.id} value={u.email || u.id}>{u.display_name}</option>
                                                             ))}
                                                             {/* Fallback for external users not in platformUsers but assigned */}
                                                             {((p as any).activities?.[0]?.workitems?.[0]?.participant_id) && !platformUsers.find(u => (u.email || u.id) === (p as any).activities?.[0]?.workitems?.[0]?.participant_id) && (

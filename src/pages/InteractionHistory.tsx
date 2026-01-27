@@ -10,7 +10,7 @@ import { InteractionForm } from '../components/crm/InteractionForm';
 
 export function InteractionHistory() {
     const [interactions, setInteractions] = useState<CRMInteraction[]>([]);
-    const [selectedDateFilter, setSelectedDateFilter] = useState<string>(new Date().toISOString().split('T')[0]);
+    const [selectedDateFilter, setSelectedDateFilter] = useState<string>(format(new Date(), 'yyyy-MM-dd'));
     const [editingInteraction, setEditingInteraction] = useState<CRMInteraction | null>(null);
 
     useEffect(() => {
@@ -30,7 +30,9 @@ export function InteractionHistory() {
         if (data) {
             const filtered = data.filter(i => {
                 if (!i.created_at) return false;
-                const localDateStr = format(new Date(i.created_at), 'yyyy-MM-dd');
+                // Forzar interpretación de la fecha UTC a local antes de formatear
+                const interactionDate = new Date(i.created_at);
+                const localDateStr = format(interactionDate, 'yyyy-MM-dd');
                 return localDateStr === selectedDateFilter;
             });
             setInteractions(filtered);

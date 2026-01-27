@@ -7,15 +7,16 @@ interface OperationsHeaderProps {
     title: string;
     description: string;
     onSyncComplete?: () => void;
+    customAction?: React.ReactNode;
 }
 
-export function OperationsHeader({ title, description, onSyncComplete }: OperationsHeaderProps) {
+export function OperationsHeader({ title, description, onSyncComplete, customAction }: OperationsHeaderProps) {
     const [isSyncing, setIsSyncing] = useState(false);
 
-    const handleAutoSync = async () => {
+    const handleAutoSync = async (forceFull: boolean = false) => {
         setIsSyncing(true);
         try {
-            await WorkflowService.syncWithWispHub();
+            await WorkflowService.syncWithWispHub(forceFull);
             if (onSyncComplete) onSyncComplete();
         } finally {
             setIsSyncing(false);
@@ -23,25 +24,41 @@ export function OperationsHeader({ title, description, onSyncComplete }: Operati
     };
 
     return (
-        <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
-            <div className="flex flex-col gap-2">
-                <h1 className="text-3xl font-black tracking-tight text-foreground flex items-center gap-2">
-                    <Activity className="text-primary" size={32} />
+        <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-8 border-b border-zinc-100 pb-6">
+            <div className="flex flex-col gap-1">
+                <h1 className="text-2xl font-bold tracking-tight text-zinc-900 flex items-center gap-3">
+                    <Activity className="text-zinc-900" size={24} />
                     {title}
                 </h1>
-                <p className="text-muted-foreground font-medium">{description}</p>
+                <p className="text-zinc-500 text-sm font-medium ml-9">{description}</p>
             </div>
-            <button
-                onClick={handleAutoSync}
-                disabled={isSyncing}
-                className={clsx(
-                    "px-5 py-3 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center gap-2 transition-all",
-                    isSyncing ? "bg-muted text-muted-foreground" : "bg-primary text-primary-foreground hover:shadow-lg hover:shadow-primary/20 active:scale-95"
-                )}
-            >
-                <RefreshCw size={16} className={isSyncing ? "animate-spin" : ""} />
-                {isSyncing ? 'Sincronizando...' : 'Sincronizar WispHub'}
-            </button>
+            <div className="flex gap-3 items-center ml-9 md:ml-0">
+                {customAction}
+                <button
+                    onClick={() => handleAutoSync(false)}
+                    disabled={isSyncing}
+                    className={clsx(
+                        "px-4 py-2 rounded-xl font-bold text-[10px] uppercase tracking-wide flex items-center gap-2 transition-all border",
+                        isSyncing ? "bg-zinc-100 text-zinc-400 border-zinc-200" : "bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-50 hover:border-zinc-300 shadow-sm"
+                    )}
+                    title="Sincronización rápida (últimos 7 días)"
+                >
+                    <RefreshCw size={14} className={isSyncing ? "animate-spin" : ""} />
+                    {isSyncing ? "Sincronizando..." : "Rápida (7d)"}
+                </button>
+                <button
+                    onClick={() => handleAutoSync(true)}
+                    disabled={isSyncing}
+                    className={clsx(
+                        "px-4 py-2 rounded-xl font-bold text-[10px] uppercase tracking-wide flex items-center gap-2 transition-all shadow-sm hover:shadow",
+                        isSyncing ? "bg-zinc-100 text-zinc-400" : "bg-zinc-900 text-white hover:bg-black"
+                    )}
+                    title="Sincronización TOTAL (Sin límite de fecha - Trae TODO el historial)"
+                >
+                    <RefreshCw size={14} className={isSyncing ? "animate-spin" : ""} />
+                    {isSyncing ? "Descargando..." : "Total (∞)"}
+                </button>
+            </div>
         </header>
     );
 }

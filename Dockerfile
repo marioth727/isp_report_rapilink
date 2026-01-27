@@ -1,37 +1,41 @@
-# Etapa 1: Build
-FROM node:20-alpine AS build
+# Stage 1: Build the Application
+FROM node:20-alpine as build
 
 WORKDIR /app
 
+# Install dependencies (only package files for caching)
 COPY package*.json ./
-RUN npm install
+RUN npm ci
 
+# Copy source code
 COPY . .
 
-# Variables de construcción para Vite
+# Build arguments for Vite (Environment Variables)
 ARG VITE_SUPABASE_URL
 ARG VITE_SUPABASE_ANON_KEY
+
+# Set environment variables during build time
 ENV VITE_SUPABASE_URL=$VITE_SUPABASE_URL
 ENV VITE_SUPABASE_ANON_KEY=$VITE_SUPABASE_ANON_KEY
-
-RUN npm run build
-
-# Etapa 2: Runtime
-FROM node:20-slim AS runtime
-
-WORKDIR /app
-
-# Solo copiamos lo necesario para correr el servidor
-COPY --from=build /app/dist ./dist
-COPY --from=build /app/server.js ./
-COPY --from=build /app/package*.json ./
-
-# Instalamos solo dependencias de producción
-RUN npm install --omit=dev
-
-ENV PORT=3000
 ENV NODE_ENV=production
 
-EXPOSE 3000
+# Build the project
+RUN npm run build
 
-CMD ["node", "server.js"]
+# Stage 2: Serve with Nginx
+FROM nginx:alpine
+
+# Remove default nginx static assets
+RUN rm -rf /usr/share/nginx/html/*
+
+# Copy custom nginx configuration
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+# Copy compiled assets from build stage
+COPY --from=build /app/dist /usr/share/nginx/html
+
+# Expose port 80
+EXPOSE 80
+
+# Start Nginx
+CMD ["nginx", "-g", "daemon off;"]

@@ -1,0 +1,32 @@
+# Reglas del Proyecto (ISP Reports)
+
+Estas reglas deben ser seguidas estrictamente por cualquier agente que trabaje en este repositorio.
+
+## 1. Organización y Orden
+- **Scripts de Utilidad**: Todos los scripts de diagnóstico, auditoría o herramientas temporales deben estar en la carpeta `scripts/`. No ensucies la raíz del proyecto.
+- **Nomenclatura**: Usa el patrón `[accion]_[entidad].mjs` para nuevos scripts (ej: `verify_sync.mjs`).
+
+## 2. Eficiencia y Diagnóstico (Anti-Bucles)
+- **Planificación**: Presenta un plan breve antes de cambios complejos.
+- **Aislamiento**: Crea un script en `scripts/` para reproducir errores antes de intentar arreglarlos.
+- **Límite de 2 Intentos**: Si fallas dos veces corrigiendo un error, detente y replantea el diagnóstico. No entres en bucle.
+- **Modelo Flash**: Úsalo para tareas repetitivas. Reserva **Pro** para lógica crítica.
+
+## 3. Estándares de Código y Calidad
+- **TypeScript Estricto**: Prohibido el uso de `any` en todo el proyecto. Cada respuesta de la API de WispHub o Supabase debe tener su interfaz o tipo definido.
+- **Gestión de Errores**: Todo llamado a APIs externas debe estar envuelto en bloques `try/catch` con logs descriptivos en consola para diagnóstico rápido.
+- **Consistencia Visual**: Los nuevos componentes deben usar los tokens de color y espaciado definidos en `tailwind.config.js` para mantener una estética "Premium".
+
+## 4. Seguridad de Datos
+- **Dry-Run**: Los scripts que modifiquen datos masivamente deben tener un modo de prueba o log de confirmación.
+- **Validación previa**: Verifica API y DB (`scripts/check_keys.mjs`, `scripts/check_db.mjs`) antes de realizar tareas críticas.
+- **Supabase RLS**: Siempre verificar que las políticas de RLS (Row Level Security) estén activas antes de exponer nuevos datos.
+
+## 5. Workflows
+- Utiliza los flujos en `.agent/workflows/` para:
+  - `sync-wisphub.md` (Sincronización)
+  - `audit-system.md` (Auditoría completa)
+  - `db-migration.md` (SQL/Supabase)
+  - `generate-types.md` (Tipos TS)
+  - `check-security.md` (Seguridad DB)
+  - `deploy-app.md` (Producción)
