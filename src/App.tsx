@@ -25,7 +25,6 @@ import InventoryStock from './pages/InventoryStock';
 import InventoryAssignment from './pages/InventoryAssignment';
 import InventoryKits from './pages/InventoryKits';
 import TechnicianStock from './pages/TechnicianStock';
-import InstallationFlow from './pages/InstallationFlow';
 import InventoryRMA from './pages/InventoryRMA';
 import InventoryAudit from './pages/InventoryAudit';
 import InventoryAnalytics from './pages/InventoryAnalytics';
@@ -87,7 +86,6 @@ function App() {
           <Route path="/operaciones/inventario/auditoria" element={<InventoryAudit />} />
           <Route path="/operaciones/inventario/analiticas" element={<InventoryAnalytics />} />
           <Route path="/operaciones/inventario/actas" element={<InventorySlips />} />
-          <Route path="/operaciones/instalaciones" element={<InstallationFlow />} />
           <Route path="/pipeline" element={<Pipeline />} />
           <Route path="/historial" element={<InteractionHistory />} />
           <Route path="/gestion/cerrar" element={<DailyReportGenerator />} />

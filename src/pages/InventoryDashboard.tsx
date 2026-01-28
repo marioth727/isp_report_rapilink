@@ -9,7 +9,6 @@ import {
     ArrowRightLeft,
     ChevronRight,
     Filter,
-    Smartphone,
     QrCode,
     CheckCircle2,
     ClipboardCheck,
@@ -195,19 +194,6 @@ export default function InventoryDashboard() {
                 <h2 className="text-[10px] font-black uppercase text-slate-400 tracking-widest px-1">📱 Operaciones de Campo</h2>
                 {/* Botones de Acción - Estilo Plano Clean */}
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                    <button
-                        onClick={() => navigate('/operaciones/instalaciones')}
-                        className="group flex flex-col gap-4 bg-white border border-slate-200 p-6 rounded-2xl hover:border-blue-300 hover:shadow-md hover:bg-blue-50/30 transition-all text-left"
-                    >
-                        <div className="p-3 bg-blue-100/50 text-blue-600 rounded-xl w-fit group-hover:scale-110 transition-transform">
-                            <Smartphone size={24} strokeWidth={2.5} />
-                        </div>
-                        <div>
-                            <p className="text-sm font-black uppercase text-slate-800">Instalar</p>
-                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">WispHub + OLT</p>
-                        </div>
-                    </button>
-
                     <button
                         onClick={() => navigate('/operaciones/inventario/escaner')}
                         className="group flex flex-col gap-4 bg-white border border-slate-200 p-6 rounded-2xl hover:border-emerald-300 hover:shadow-md hover:bg-emerald-50/30 transition-all text-left"
