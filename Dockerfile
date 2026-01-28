@@ -34,6 +34,9 @@ RUN test -f dist/index.html || (echo "ERROR: index.html missing in dist folder" 
 # Stage 2: Serve with Nginx
 FROM nginx:alpine
 
+# FORCE REBUILD: Change this timestamp to bust cache
+ENV CACHE_BUST=2026-01-27-FIX-404
+
 # Remove default nginx static assets
 RUN rm -rf /usr/share/nginx/html/*
 
