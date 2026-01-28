@@ -28,8 +28,12 @@ FROM nginx:alpine
 # Remove default nginx static assets
 RUN rm -rf /usr/share/nginx/html/*
 
-# Copy custom nginx configuration
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# Set Environment Variable Filter for envsubst (Prevents breaking $uri)
+ENV NGINX_ENVSUBST_FILTER="VITE_"
+
+# Copy custom nginx configuration to templates directory
+# Nginx will automatically process this file, replace Envs, and output to conf.d
+COPY nginx.conf /etc/nginx/templates/default.conf.template
 
 # Copy compiled assets from build stage
 COPY --from=build /app/dist /usr/share/nginx/html
