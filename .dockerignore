@@ -1,23 +1,43 @@
+# Dependencies
 node_modules
+.npm
+.yarn
+
+# Build output
 dist
-.git
-.env
-.env.local
-.env.*.local
+dist-ssr
+
+# Logs
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# Environment keys (CRITICAL: Never commit these)
+.env
+.env.local
+.env.*.local
+
+# IDE
 .vscode
+.idea
+*.suo
+*.ntvs
+*.njsproj
+*.sln
+*.sw?
+
+# Agent
 .antigravity
 brain
-*.mjs
-*.sql
-*.js
-!server.js
-!postcss.config.js
-!tailwind.config.js
-!package.json
-!package-lock.json
-Dockerfile
-.dockerignore
-README.md
+
+# OS Files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Git
+.git
+.gitignore
+
+# Project-specific ignored files that are not needed in build
+# (Add specific large files here if needed)
