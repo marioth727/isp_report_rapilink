@@ -35,16 +35,16 @@ RUN test -f dist/index.html || (echo "ERROR: index.html missing in dist folder" 
 FROM nginx:alpine
 
 # FORCE REBUILD: Change this timestamp to bust cache
-ENV CACHE_BUST=2026-01-27-FIX-404
+ENV CACHE_BUST=2026-01-27-FINAL-FIX-V3
 
 # Remove default nginx static assets
 RUN rm -rf /usr/share/nginx/html/*
 
-# Copy custom nginx configuration (STATIC - protects $uri)
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# Enable Filter to ONLY replace vars starting with VITE_ (Protects $uri)
+ENV NGINX_ENVSUBST_FILTER="VITE_"
 
-# Copy api proxies configuration (TEMPLATE - processes Env Vars)
-COPY api_proxies.conf /etc/nginx/templates/api_proxies.conf.template
+# Copy custom nginx configuration as template
+COPY nginx.conf /etc/nginx/templates/default.conf.template
 
 # Copy compiled assets from build stage
 COPY --from=build /app/dist /usr/share/nginx/html
