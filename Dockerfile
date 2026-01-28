@@ -10,6 +10,9 @@ RUN npm ci
 # Copy source code
 COPY . .
 
+# DEBUG: List files to ensure source is copied correctly
+RUN echo "--- DEBUG: Source Files in /app ---" && ls -la
+
 # Build arguments for Vite (Environment Variables)
 ARG VITE_SUPABASE_URL
 ARG VITE_SUPABASE_ANON_KEY
@@ -21,6 +24,12 @@ ENV NODE_ENV=production
 
 # Build the project
 RUN npm run build
+
+# DEBUG: Verify build output
+RUN echo "--- DEBUG: Build Output in /app/dist ---" && ls -la dist || echo "DIST NOT FOUND"
+
+# CRITICAL: Fail build if index.html is missing
+RUN test -f dist/index.html || (echo "ERROR: index.html missing in dist folder" && exit 1)
 
 # Stage 2: Serve with Nginx
 FROM nginx:alpine
