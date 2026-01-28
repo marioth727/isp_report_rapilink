@@ -34,17 +34,21 @@ RUN test -f dist/index.html || (echo "ERROR: index.html missing in dist folder" 
 # Stage 2: Serve with Nginx
 FROM nginx:alpine
 
-# FORCE REBUILD: Change this timestamp to bust cache
-ENV CACHE_BUST=2026-01-27-FINAL-FIX-V3
+# FORCE REBUILD
+ENV CACHE_BUST=2026-01-27-SED-METHOD
 
 # Remove default nginx static assets
 RUN rm -rf /usr/share/nginx/html/*
 
-# Enable Filter to ONLY replace vars starting with VITE_ (Protects $uri)
-ENV NGINX_ENVSUBST_FILTER="VITE_"
+# Create template directory
+RUN mkdir -p /etc/nginx/templates
 
-# Copy custom nginx configuration as template
-COPY nginx.conf /etc/nginx/templates/default.conf.template
+# Copy Custom Config to Templates (Not conf.d directly yet)
+COPY nginx.conf /etc/nginx/templates/nginx.conf
+
+# Copy Startup Script
+COPY start.sh /start.sh
+RUN chmod +x /start.sh
 
 # Copy compiled assets from build stage
 COPY --from=build /app/dist /usr/share/nginx/html
@@ -52,5 +56,5 @@ COPY --from=build /app/dist /usr/share/nginx/html
 # Expose port 80
 EXPOSE 80
 
-# Start Nginx
-CMD ["nginx", "-g", "daemon off;"]
+# Start with custom script
+CMD ["/start.sh"]
