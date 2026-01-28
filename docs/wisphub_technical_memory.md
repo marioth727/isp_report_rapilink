@@ -49,4 +49,28 @@ Se creó el método `SmartOLTService.normalizeSerialNumber(sn)` que detecta auto
 
 ### Instalaciones
 *   El registro de instalaciones utiliza el endpoint `/api/wisphub/solicitudes-instalacion`.
-*   Es crucial enviar el `id_zona` correcto (mapeado desde el Router Mikrotik seleccionado) para que la instalación se cree en el nodo adecuado.
+
+## 3. Gestión de Autenticación y Usuarios (Supabase Auth)
+
+### El Fenómeno de los Usuarios "Zombies" 🧟
+> [!WARNING]
+> Se detectó un estado crítico donde registros en `public.profiles` existían sin un homólogo válido en `auth.users`, o con registros corruptos en `auth.users` (campos `created_at`, `instance_id` o metadatos en `NULL`).
+
+**Impacto:**
+- Los usuarios son invisibles en el Dashboard de Supabase.
+- El login falla con `500 Internal Server Error` (Database error querying schema) debido a que el servidor de Go no puede escanear valores `NULL` en columnas de tokens.
+
+### Estrategia de "Resurrección" y "Auto-Sanación"
+Se implementaron dos funciones RPC con privilegios de `SECURITY DEFINER` para gestionar esto desde el frontend sin exponer llaves de servicio:
+
+1.  **`create_new_user`**: Crea el usuario en ambas tablas (`auth` y `public`) en una sola transacción atómica, evitando huérfanos.
+2.  **`update_user_credentials` (v4)**: 
+    - **Sincronización Total**: Se llama en cada guardado de configuración.
+    - **Resurrección**: Si el usuario no existe en `auth.users`, lo crea usando el email del perfil.
+    - **Auto-Sanación**: Si el registro existe pero está corrupto (es un "Zombie"), repara automáticamente los campos `created_at`, `instance_id` y metadatos obligatorios.
+
+### Configuración de Seguridad (RLS)
+*   La tabla `public.profiles` está protegida por RLS.
+*   Solo los administradores o el propio usuario pueden modificar el perfil.
+*   Las funciones RPC actúan como bypass controlado para operaciones que requieren privilegios de `auth.users`.
+

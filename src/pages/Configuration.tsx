@@ -1,7 +1,9 @@
 
 import { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
-import { createClient } from '@supabase/supabase-js';
+// createClient removed 
+// Just removing it from the import list if it was destructive.
+// Let's just remove the line if it was: import { createClient } from '@supabase/supabase-js';
 import clsx from 'clsx';
 import {
     Save,
@@ -119,39 +121,23 @@ export function Configuration() {
         setCreatingUser(true);
 
         try {
-            // Create a temporary client to avoid logging out the admin
-            const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-            const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
-            const tempSupabase = createClient(supabaseUrl, supabaseAnonKey, {
-                auth: { persistSession: false }
+            console.log("🚀 %c LÓGICA V2 ACTIVA: Intentando crear usuario vía RPC...", "color: lime; font-weight: bold; font-size: 14px");
+
+            // 1. Call custom RPC to create user directly in auth.users and profiles
+            const { data: newUserId, error: rpcError } = await supabase.rpc('create_new_user', {
+                email_input: newUserEmail,
+                password_input: newUserPassword,
+                full_name_input: newUserName,
+                role_input: newUserRole,
+                wisphub_id_input: newUserWispHubId || null,
+                operational_level_input: newUserOperationalLevel,
+                is_field_tech_input: newUserIsFieldTech,
+                allowed_menus_input: newUserAllowedMenus
             });
 
-            const { data: authData, error } = await tempSupabase.auth.signUp({
-                email: newUserEmail,
-                password: newUserPassword,
-                options: {
-                    data: {
-                        full_name: newUserName,
-                        role: newUserRole
-                    }
-                }
-            });
+            if (rpcError) throw rpcError;
 
-            if (error) throw error;
-
-            // 2. Create Profile Record using the NEW user ID
-            if (authData?.user?.id) {
-                const { error: profileError } = await supabase.from('profiles').upsert({
-                    id: authData.user.id,
-                    full_name: newUserName,
-                    wisphub_id: newUserWispHubId,
-                    operational_level: newUserOperationalLevel,
-                    is_field_tech: newUserIsFieldTech,
-                    allowed_menus: newUserAllowedMenus,
-                    role: newUserRole
-                });
-                if (profileError) throw profileError;
-            }
+            console.log("User created via RPC with ID:", newUserId);
 
             alert(`Usuario ${newUserName} creado exitosamente.`);
             setNewUserEmail('');
@@ -259,31 +245,56 @@ Esta acción es IRREVERSIBLE y eliminará tanto su perfil como su cuenta de acce
 
 
     const handleUpdateUser = async (userId: string) => {
+        console.log("--- DEBUG UPDATE USER ---");
+        console.log("Target ID:", userId);
+        console.log("Email Input:", editingEmail);
+        console.log("Password Input:", editingPassword ? "[REDACTED]" : "(empty)");
+
         try {
             const { data: { user: currentUser } } = await supabase.auth.getUser();
 
-            // 0. Update Credentials via RPC if provided
-            if (editingEmail || editingPassword) {
-                const { error: rpcError } = await supabase.rpc('update_user_credentials', {
-                    target_user_id: userId,
-                    new_email: editingEmail || null,
-                    new_password: editingPassword || null
-                });
-                if (rpcError) throw rpcError;
+            // 0. Sincronización Total (Auth + Profile) via RPC
+            // Llamamos SIEMPRE a la RPC para garantizar que el usuario exista en Auth (Resurrección)
+            // y que los metadatos estén sincronizados.
+            console.log("Calling RPC update_user_credentials (Sync Mode)...");
+
+            const { error: rpcError } = await supabase.rpc('update_user_credentials', {
+                target_user_id: userId,
+                new_email: editingEmail || null,     // Si está vacío, la RPC usa el actual del perfil
+                new_password: editingPassword || null,
+                new_full_name: editingUserName,
+                new_role: editingRole
+            });
+
+            if (rpcError) {
+                console.error("RPC Error:", rpcError);
+                // Si el error es duplicado, lanzamos error específico para que el catch lo muestre
+                if (rpcError.message?.includes('unique constraint') || rpcError.code === '23505') {
+                    throw new Error("El correo electrónico ya está en uso por otro usuario.");
+                }
+                throw rpcError;
             }
+            console.log("RPC Success: Auth User Synced.");
 
             // 1. Actualizar Tabla de Perfiles
+            const profileUpdates: any = {
+                id: userId,
+                full_name: editingUserName,
+                wisphub_id: editingWispHubId,
+                operational_level: editingOperationalLevel,
+                is_field_tech: editingIsFieldTech,
+                allowed_menus: editingAllowedMenus,
+                role: editingRole
+            };
+
+            // Only update email in profile if it was changed
+            if (editingEmail) {
+                profileUpdates.email = editingEmail;
+            }
+
             const { error: profileError } = await supabase
                 .from('profiles')
-                .upsert({
-                    id: userId,
-                    full_name: editingUserName,
-                    wisphub_id: editingWispHubId,
-                    operational_level: editingOperationalLevel,
-                    is_field_tech: editingIsFieldTech,
-                    allowed_menus: editingAllowedMenus,
-                    role: editingRole
-                });
+                .upsert(profileUpdates);
 
             if (profileError) throw profileError;
 
@@ -736,13 +747,13 @@ Esta acción es IRREVERSIBLE y eliminará tanto su perfil como su cuenta de acce
                                             </div>
                                             <div className="grid grid-cols-2 gap-2">
                                                 <div className="flex flex-col gap-1">
-                                                    <label className="text-[9px] font-black text-blue-500 uppercase">Nuevo Correo</label>
+                                                    <label className="text-[9px] font-black text-blue-500 uppercase">Correo</label>
                                                     <input
                                                         type="email"
                                                         value={editingEmail}
                                                         onChange={(e) => setEditingEmail(e.target.value)}
                                                         className="p-2 rounded-lg border border-blue-200 bg-blue-50 text-sm font-bold outline-none"
-                                                        placeholder="Opcional"
+                                                        placeholder="Correo de acceso..."
                                                     />
                                                 </div>
                                                 <div className="flex flex-col gap-1">
@@ -752,24 +763,37 @@ Esta acción es IRREVERSIBLE y eliminará tanto su perfil como su cuenta de acce
                                                         value={editingPassword}
                                                         onChange={(e) => setEditingPassword(e.target.value)}
                                                         className="p-2 rounded-lg border border-blue-200 bg-blue-50 text-sm font-bold outline-none"
-                                                        placeholder="Opcional"
+                                                        placeholder="Opcional (si deseas cambiarla)"
                                                         minLength={6}
                                                     />
                                                 </div>
                                             </div>
-                                            <div className="flex flex-col gap-1">
-                                                <label className="text-[9px] font-black text-slate-400 uppercase">Nivel Operativo</label>
-                                                <select
-                                                    value={editingOperationalLevel}
-                                                    onChange={(e) => setEditingOperationalLevel(Number(e.target.value))}
-                                                    className="p-2 rounded-lg border border-slate-300 bg-white text-sm font-bold outline-none"
-                                                >
-                                                    <option value={0}>Nivel 0 (Soporte Técnico)</option>
-                                                    <option value={1}>Nivel 1 (Técnico de Redes)</option>
-                                                    <option value={2}>Nivel 2 (Supervisor de Operaciones)</option>
-                                                    <option value={3}>Nivel 3 (Jefe de Operaciones)</option>
-                                                    <option value={4}>Nivel 4 (Gerente de Operaciones)</option>
-                                                </select>
+                                            <div className="grid grid-cols-2 gap-2">
+                                                <div className="flex flex-col gap-1">
+                                                    <label className="text-[9px] font-black text-slate-400 uppercase">Rol de Usuario</label>
+                                                    <select
+                                                        value={editingRole}
+                                                        onChange={(e) => setEditingRole(e.target.value as 'agente' | 'admin')}
+                                                        className="p-2 rounded-lg border border-slate-300 bg-white text-sm font-bold outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
+                                                    >
+                                                        <option value="agente">👤 Agente (Estándar)</option>
+                                                        <option value="admin">🛡️ Admin (Control Total)</option>
+                                                    </select>
+                                                </div>
+                                                <div className="flex flex-col gap-1">
+                                                    <label className="text-[9px] font-black text-slate-400 uppercase">Nivel Operativo</label>
+                                                    <select
+                                                        value={editingOperationalLevel}
+                                                        onChange={(e) => setEditingOperationalLevel(Number(e.target.value))}
+                                                        className="p-2 rounded-lg border border-slate-300 bg-white text-sm font-bold outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
+                                                    >
+                                                        <option value={0}>Nivel 0 (Soporte Técnico)</option>
+                                                        <option value={1}>Nivel 1 (Técnico de Redes)</option>
+                                                        <option value={2}>Nivel 2 (Supervisor de Operaciones)</option>
+                                                        <option value={3}>Nivel 3 (Jefe de Operaciones)</option>
+                                                        <option value={4}>Nivel 4 (Gerente de Operaciones)</option>
+                                                    </select>
+                                                </div>
                                             </div>
                                             <div className="flex flex-col gap-2 mt-2">
                                                 <label className="text-[9px] font-black text-slate-400 uppercase">Permisos de Menú</label>
@@ -851,6 +875,7 @@ Esta acción es IRREVERSIBLE y eliminará tanto su perfil como su cuenta de acce
                                                     setEditingOperationalLevel(user.operational_level !== undefined ? user.operational_level : 1);
                                                     setEditingIsFieldTech(user.is_field_tech || false);
                                                     setEditingRole(user.role === 'admin' ? 'admin' : 'agente');
+                                                    setEditingEmail(user.email || '');
                                                     setEditingAllowedMenus(user.allowed_menus || ["Dashboard"]);
                                                 }}
                                                 className="px-3 py-1.5 bg-white border border-slate-200 text-slate-600 hover:text-blue-600 hover:border-blue-300 text-[10px] font-black rounded-lg uppercase transition-all shadow-sm"

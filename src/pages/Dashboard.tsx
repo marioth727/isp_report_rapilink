@@ -111,22 +111,46 @@ export function Dashboard() {
 
     const fetchStaleLeads = async (userId: string) => {
         try {
-            const { data, error } = await supabase
+            // 1. Get the ID for "Closed/Won" stage dynamically
+            const { data: stages } = await supabase
+                .from('pipeline_stages')
+                .select('id, name')
+                .eq('user_id', userId);
+
+            // Find IDs for closing stages (won or lost) to exclude them
+            const closedStageIds = stages
+                ?.filter(s => s.name.toLowerCase().includes('ganado') || s.name.toLowerCase().includes('perdido'))
+                .map(s => s.id) || [];
+
+            // 2. Fetch Deals
+            let query = supabase
                 .from('sales_pipeline')
                 .select('*')
                 .eq('user_id', userId)
-                .neq('stage_id', 'ganado') // Assuming ID or just filter out closed
                 .order('updated_at', { ascending: true });
+
+            // Apply filter only if we found the closed stages
+            if (closedStageIds.length > 0) {
+                // Use .not with filter syntax for 'in' causing checks
+                // Simpler: iterate in memory if list is small, or use .not('stage_id', 'in', `(${closedStageIds.join(',')})`)
+                // Supabase JS .not syntax: .not('stage_id', 'in', `(${list})`) can be tricky.
+                // Let's use JavaScript filtering for safety and speed on small datasets, 
+                // OR use .filter for precise UUID exclusion if Supabase supports it cleanly.
+                // For now, let's fetch open deals and filter in JS to avoid 400s if syntax is off.
+            }
+
+            const { data, error } = await query;
 
             if (error) throw error;
 
-            // Filter leads with more than 48 hours without update
+            // Filter leads with more than 48 hours without update AND not closed
             const fortyEightHoursAgo = subDays(new Date(), 2);
-            const stale = (data || []).filter(deal =>
-                new Date(deal.updated_at) < fortyEightHoursAgo &&
-                !deal.stage_id.toLowerCase().includes('ganado') &&
-                !deal.stage_id.toLowerCase().includes('perdido')
-            );
+
+            const stale = (data || []).filter(deal => {
+                const isClosed = closedStageIds.includes(deal.stage_id);
+                const isOld = new Date(deal.updated_at) < fortyEightHoursAgo;
+                return isOld && !isClosed;
+            });
 
             setStaleLeads(stale);
         } catch (err) {
