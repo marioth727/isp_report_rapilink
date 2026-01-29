@@ -43,13 +43,13 @@ export const TICKET_SUBJECTS = [
     "Niveles Potencia Altos", "Notificación Datacrédito", "Gestión De Cartera Corte 30", "Gestión De Cartera Corte 15",
     "Recolección De Equipos 2", "Noficación Datacrédito 2", "Retiro De Servicio", "Problema De Tv/Niveles Altos",
     "Problemas De Tv", "Internet Lento/Niveles Altos", "Validación De Niveles", "Instalación De Tv", "Problemas De Conexion",
-    "Acceso Remoto Inactivo", "Fibra Partida", "Instatalacion Nueva", "Instalacion De Switch", "Punto De Tv Adicional",
     "Cable Flojo", "Cable De Fibra Colgado", "Cargador Dañado", "Router Dañado", "Verificacion De Megas", "Wifi Quemado",
     "Cable Bajito", "Sintonización Tv", "Instalación Tdt", "Reubicación de Onu", "Adaptación De Tdt", "Catv Quemada",
     "Problemas De Conexión/Niveles Altos", "Gestión Clausula", "Paz Y Salvo", "Descuento", "Recordatorio Pago Por Whatsapp",
     "Promesa De Pago", "Proyecto De Trabajo", "Cambio De Fecha 30", "Cambio De Fecha 15", "Cambio De Plan",
     "Cambio De Titular", "Gestión De Bienvenida", "No Interesado", "Cancela Solicitud", "Post Retiro", "Post Retiro 2 Gestión",
     "Post Retiro 3 Gestión", "Encuesta De Satisfacción", "Gestion Por Daño", "Cobro De Visita", "No Contesta Para Inst Tv",
+    "Instalación Nueva", "Instalación De Switch", "Punto De Tv Adicional",
     "Prorrateo Corte 30", "Prorrateo Corte 15", "Oferta Planes", "Confirmacion De Pago", "Asesoria Para Pago En Linea",
     "Asesoria Para Traslado", "Asesoria Para Reconexion", "Asesoria Para Cambio De Titular", "Asesoria Para Cambio De Plan",
     "Asesoria Para Cambio De Fecha De Pago", "Firma Del Contrato", "Asesoria Para Retiro", "Recordatorio Whatsapp - Cartera 2024",
@@ -129,6 +129,17 @@ export function stripHtml(html: string): string {
         .replace(/&nbsp;/g, ' ')
         .replace(/\n\s*\n/g, '\n\n')
         .trim();
+}
+
+export function whNormalize(text: string | null | undefined): string {
+    if (!text) return "";
+    return text.toString()
+        .toLowerCase()
+        .trim()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "") // Quitar acentos
+        .replace(/[^a-z0-9\s]/g, "")   // Quitar puntuación redundante
+        .replace(/\s+/g, " ");          // Colapsar espacios múltiples
 }
 
 export const WisphubService = {
@@ -495,6 +506,68 @@ export const WisphubService = {
         }
     },
 
+    /**
+     * Obtiene una lista única de barrios y coordenadas (si existen) desde la lista de clientes.
+     */
+    async getAllClientsBarrios(): Promise<{ name: string; latitude?: number; longitude?: number; count: number }[]> {
+        try {
+            console.log('[WispHub] Extrayendo barrios desde la lista de clientes...');
+            // Obtenemos una muestra significativa de clientes activos (limit 500 para balancear velocidad)
+            const url = `${BASE_URL}/clientes/?estado=1&limit=500`;
+            const response = await safeFetch(url);
+
+            if (!response.ok) {
+                console.error('[WispHub] Error al consultar clientes para barrios:', response.status);
+                return [];
+            }
+
+            const data = await response.json();
+            const clients = data.results || [];
+
+            const neighborhoodMap = new Map<string, { name: string; latSum: number; lngSum: number; geoCount: number; totalCount: number }>();
+
+            clients.forEach((c: any) => {
+                const bName = (c.barrio || c.localidad || 'Sin Barrio').trim();
+                if (!bName) return;
+
+                const normalizedKey = whNormalize(bName);
+
+                const existing = neighborhoodMap.get(normalizedKey) || {
+                    name: bName, // Guardamos el primer nombre legible que encontremos
+                    latSum: 0,
+                    lngSum: 0,
+                    geoCount: 0,
+                    totalCount: 0
+                };
+
+                existing.totalCount++;
+
+                // Si el cliente tiene coordenadas válidas en WispHub, las promediamos
+                const lat = parseFloat(c.latitud);
+                const lng = parseFloat(c.longitud);
+
+                if (!isNaN(lat) && !isNaN(lng) && lat !== 0 && lng !== 0) {
+                    existing.latSum += lat;
+                    existing.lngSum += lng;
+                    existing.geoCount++;
+                }
+
+                neighborhoodMap.set(normalizedKey, existing);
+            });
+
+            return Array.from(neighborhoodMap.values()).map(item => ({
+                name: item.name,
+                latitude: item.geoCount > 0 ? item.latSum / item.geoCount : undefined,
+                longitude: item.geoCount > 0 ? item.lngSum / item.geoCount : undefined,
+                count: item.totalCount
+            })).sort((a, b) => b.count - a.count);
+
+        } catch (error) {
+            console.error('[WispHub] Error crítico en getAllClientsBarrios:', error);
+            return [];
+        }
+    },
+
     async getAllTickets(filters?: { startDate?: string; endDate?: string; status?: string }, onProgress?: (current: number, total: number) => void): Promise<any[]> {
         try {
             // Asegurar que el staff esté cargado para mapear nombres reales
@@ -507,9 +580,16 @@ export const WisphubService = {
                 const start = filters.startDate || '2024-01-01';
                 const end = filters.endDate || new Date().toISOString().split('T')[0];
                 baseUrl += `&fecha_creacion_0=${start}&fecha_creacion_1=${end}`;
+            } else if (filters?.status === '1') {
+                // Para despacho (abiertos), buscamos los últimos 60 días para asegurar no perder nada histórico pero ser rápidos
+                const past = new Date();
+                past.setDate(past.getDate() - 60);
+                const start = past.toISOString().split('T')[0];
+                const end = new Date().toISOString().split('T')[0];
+                baseUrl += `&fecha_creacion_0=${start}&fecha_creacion_1=${end}`;
             } else {
                 const past = new Date();
-                past.setDate(past.getDate() - 30);
+                past.setDate(past.getDate() - 15); // Por defecto solo 15 días si no hay filtro para ser ultra rápidos
                 const start = past.toISOString().split('T')[0];
                 const end = new Date().toISOString().split('T')[0];
                 baseUrl += `&fecha_creacion_0=${start}&fecha_creacion_1=${end}`;
@@ -579,6 +659,10 @@ export const WisphubService = {
     },
 
     mapTicket(t: any) {
+        // Log de diagnóstico para tickets sin nombre
+        if (!t.nombre_cliente && !t.cliente && !t.cliente_nombre) {
+            console.warn(`[Wisphub Diagnostic] Ticket #${t.id} sin campos de nombre estándar. Keys:`, Object.keys(t));
+        }
         const now = new Date();
         const createdDate = new Date(t.fecha_creacion || t.created_at || t.fecha);
         const diffMs = now.getTime() - createdDate.getTime();
@@ -590,29 +674,74 @@ export const WisphubService = {
         let priorityKey = String(t.prioridad || '1');
         if (priorityTextToId[priorityKey]) priorityKey = String(priorityTextToId[priorityKey]);
 
-        let finalClientName = t.nombre_cliente || t.cliente_nombre || "";
+        let finalClientName = (t.nombre_cliente || t.cliente_nombre || t.nombre_completo || t.cliente || t.nombre || "");
+
+        // Si el cliente es un objeto (como en el detalle), extraer nombre
+        if (typeof finalClientName === 'object') {
+            const co = finalClientName as any;
+            finalClientName = co.nombre || co.client_name || co.nombre_cliente || co.nombre_completo || co.full_name || "";
+        }
+
+        // Si tenemos nombre y apellido separados en la raíz
+        if (!finalClientName || finalClientName === "") {
+            const firstName = t.nombre || t.first_name || "";
+            const lastName = t.apellidos || t.apellido || t.last_name || "";
+            if (firstName || lastName) finalClientName = `${firstName} ${lastName}`.trim();
+        }
+
         let finalCedula = "";
 
         // Intentar extraer de objetos anidados (cliente o servicio)
         const possibleClient = t.cliente || t.servicio;
         if (possibleClient && typeof possibleClient === 'object') {
-            finalClientName = finalClientName || possibleClient.nombre || possibleClient.client_name || possibleClient.nombre_cliente || "";
-            finalCedula = possibleClient.cedula || "";
+            finalClientName = finalClientName ||
+                possibleClient.nombre ||
+                possibleClient.client_name ||
+                possibleClient.nombre_cliente ||
+                possibleClient.nombre_completo ||
+                possibleClient.cliente_nombre ||
+                possibleClient.nombre_cliente_completo || "";
+            finalCedula = possibleClient.cedula || possibleClient.dni || "";
         }
 
-        // Si sigue vacío, poner fallback
-        if (!finalClientName) finalClientName = "Cliente Desconocido";
-
         const serviceObj = typeof t.servicio === 'object' ? t.servicio : null;
-        let finalServiceId = String(t.id_servicio || t.servicio || "0");
+        const clientObj = typeof t.cliente === 'object' ? t.cliente : null;
+
+        let finalServiceId = (t.id_servicio || t.cliente_id) ? String(t.id_servicio || t.cliente_id) :
+            (serviceObj?.id_servicio || serviceObj?.id || (typeof t.servicio !== 'object' ? String(t.servicio || "") : null));
+
+        // --- ÚLTIMA RED DE SEGURIDAD PARA EL NOMBRE ---
+        if (!finalClientName || finalClientName === "Cliente Desconocido") {
+            // Si tenemos el usuario de wisphub, lo usamos como nombre
+            const backupUser = serviceObj?.usuario || clientObj?.usuario || t.usuario || t.username;
+            if (backupUser) finalClientName = `USUARIO: ${backupUser}`;
+            else if (finalServiceId) finalClientName = `SERVICIO: ${finalServiceId}`;
+        }
         if (serviceObj) {
-            finalServiceId = String(serviceObj.id_servicio || serviceObj.id || finalServiceId);
+            if (!finalServiceId) finalServiceId = String(serviceObj.id_servicio || serviceObj.id);
             if (!finalCedula) finalCedula = serviceObj.cedula || "";
+        } else if (clientObj) {
+            if (!finalServiceId) finalServiceId = String(clientObj.id_servicio || clientObj.id);
+            if (!finalCedula) finalCedula = clientObj.cedula || "";
         }
 
         let finalAsunto = "Sin Asunto";
         if (t.asunto) {
             finalAsunto = typeof t.asunto === 'object' ? (t.asunto.nombre || "Asunto") : String(t.asunto);
+        }
+
+        // --- HEURÍSTICA DE NORMALIZACIÓN: CORREGIR INTERCAMBIO CLIENTE <-> ASUNTO ---
+        // WispHub a veces pone el tipo de trabajo en 'nombre_cliente' y el cliente en 'asunto' para instalaciones.
+        const normClient = whNormalize(finalClientName);
+        const subjectKeywords = ['instalacion', 'cambio de', 'retiro', 'soporte', 'revision', 'reconexion'];
+
+        const clientLooksLikeSubject = subjectKeywords.some(key => normClient.includes(key));
+        const asuntoLooksLikeName = finalAsunto.includes('/') || finalAsunto.split(' ').length >= 2;
+
+        if (clientLooksLikeSubject && asuntoLooksLikeName) {
+            const temp = finalClientName;
+            finalClientName = finalAsunto;
+            finalAsunto = temp;
         }
 
         const statusText = String(t.estado || t.nombre_estado || 'Nuevo');
@@ -650,6 +779,7 @@ export const WisphubService = {
             id_prioridad: Number(priorityKey),
             nombre_estado: finalNombreEstado,
             id_estado: finalIdEstado,
+            id_servicio: finalServiceId,
             servicio: finalServiceId,
             servicio_completo: serviceObj,
             nombre_tecnico: (() => {
@@ -675,8 +805,33 @@ export const WisphubService = {
             horas_abierto: diffHours,
             sla_status: diffHours > 48 ? 'critico' : diffHours > 24 ? 'amarillo' : 'verde',
             fecha_creacion: t.fecha_creacion || t.created_at || t.fecha,
-            creado_por: t.creado_por || t.created_by || null,
-            descripcion: t.descripcion || ''
+            creado_por: (() => {
+                const creatorId = String(t.creado_por || t.created_by || "").toLowerCase().trim();
+                if (!creatorId) return 'Sistema';
+
+                if (GLOBAL_STAFF_CACHE) {
+                    const found = GLOBAL_STAFF_CACHE.find(s =>
+                        (s.usuario && s.usuario.toLowerCase() === creatorId) ||
+                        (s.email && s.email.toLowerCase() === creatorId) ||
+                        (whNormalize(s.nombre) === whNormalize(creatorId))
+                    );
+                    if (found) return found.nombre;
+                }
+                return t.creado_por || t.created_by || 'Sistema';
+            })(),
+            descripcion: t.descripcion || '',
+            // Campos extendidos de servicio (útiles para despacho y detalles)
+            direccion: serviceObj?.direccion || t.direccion || '',
+            telefono: serviceObj?.telefono || t.telefono || '',
+            celular: serviceObj?.celular || t.celular || '',
+            usuario_wisphub: serviceObj?.usuario ||
+                clientObj?.usuario ||
+                t.usuario ||
+                t.usuario_wisphub ||
+                t.username ||
+                t.user ||
+                t.usuario_mikrotik || 'N/A',
+            estado_servicio: serviceObj?.estado || clientObj?.estado || t.estado_servicio || 'Activo'
         };
     },
 

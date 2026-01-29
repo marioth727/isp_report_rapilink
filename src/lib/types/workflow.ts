@@ -43,3 +43,15 @@ export interface WorkflowLog {
     actor_id?: string;
     created_at: string;
 }
+
+export interface PlatformUser {
+    id: string;
+    full_name: string | null;
+    display_name: string;
+    email: string | null;
+    role: string | null;
+    wisphub_id: string | null;
+    operational_level: number | null;
+    is_field_tech: boolean;
+    is_profile: boolean;
+}

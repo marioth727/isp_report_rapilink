@@ -1,6 +1,6 @@
 import { supabase } from './supabase';
 import { WisphubService, stripHtml } from './wisphub';
-import type { WorkflowProcess, WorkflowLog, ParticipantType } from './types/workflow';
+import type { WorkflowProcess, WorkflowLog, ParticipantType, PlatformUser } from './types/workflow';
 
 /**
  * Normaliza un texto para comparaciones (minúsculas, sin espacios extras)
@@ -142,14 +142,14 @@ export const WorkflowService = {
         return true;
     },
 
-    async getPlatformUsers() {
+    async getPlatformUsers(): Promise<PlatformUser[]> {
         try {
             console.log('[getPlatformUsers] 🔍 Iniciando carga de perfiles...');
 
             // 1. Obtener perfiles reales con ID de WispHub
             const { data: profiles, error: profilesError } = await supabase
                 .from('profiles')
-                .select('id, full_name, email, role, wisphub_id, operational_level');
+                .select('id, full_name, email, role, wisphub_id, operational_level, is_field_tech');
 
             if (profilesError) {
                 console.error('[getPlatformUsers] ❌ Error obteniendo profiles:', profilesError);
@@ -173,8 +173,10 @@ export const WorkflowService = {
                 full_name: p.full_name, // Mantener para el select
                 display_name: p.full_name || p.email || `ID: ${p.id.substring(0, 8)}`,
                 email: p.email,
+                role: p.role,
                 wisphub_id: p.wisphub_id,
                 operational_level: p.operational_level, // CRÍTICO para el filtro de escalado
+                is_field_tech: p.is_field_tech,
                 is_profile: true
             }));
 
@@ -187,8 +189,10 @@ export const WorkflowService = {
                         full_name: `Técnico: ${id.substring(0, 8)}`,
                         display_name: `Técnico: ${id.substring(0, 8)}`,
                         email: null,
+                        role: 'agente',
                         wisphub_id: id,
                         operational_level: null,
+                        is_field_tech: false,
                         is_profile: false
                     });
                 }
@@ -1156,4 +1160,161 @@ export const WorkflowService = {
             return false;
         }
     },
+
+    // --- SISTEMA DE DESPACHO INTELIGENTE (NOC) ---
+
+    /**
+     * Calcula el Dispatch Score para un ticket basado en prioridad, SLA y recurrencia.
+     */
+    async calculateDispatchScore(ticket: any): Promise<number> {
+        let score = 0;
+
+        // 1. Prioridad (Peso Crítico)
+        const priorityWeights: Record<number, number> = {
+            1: 5,   // Baja
+            2: 20,  // Normal
+            3: 50,  // Alta
+            4: 100, // Muy Alta
+            5: 150  // Crítica
+        };
+        score += priorityWeights[ticket.id_prioridad] || 20;
+
+        // 2. Antigüedad (SLA) - 1 punto por hora abierto
+        const hoursOpen = ticket.horas_abierto || 0;
+        score += hoursOpen;
+
+        // 3. Recurrencia (Visitas en el mes)
+        const serviceId = ticket.servicio;
+        if (serviceId) {
+            const now = new Date();
+            const recurrence = await this.getClientRecurrence(String(serviceId), now.getFullYear(), now.getMonth() + 1);
+            if (recurrence > 1) {
+                // Penalización/Prioridad por cada visita adicional
+                score += (recurrence - 1) * 60;
+            }
+        }
+
+        return score;
+    },
+
+    /**
+     * Obtiene la cantidad de tickets/procesos para un cliente en un mes específico.
+     */
+    async getClientRecurrence(clientId: string, year: number, month: number): Promise<number> {
+        const { data, error } = await supabase
+            .rpc('get_client_visit_count', {
+                p_client_id: clientId,
+                p_year: year,
+                p_month: month
+            });
+
+        if (error) {
+            console.error('[Dispatch] Error calculando recurrencia:', error);
+            return 0;
+        }
+        return data || 0;
+    },
+
+    /**
+     * Obtiene la georreferenciación de un barrio desde la base de datos local.
+     */
+    async getNeighborhoodGeoref(name: string) {
+        if (!name) return null;
+        const { data, error } = await supabase
+            .from('op_neighborhoods_georef')
+            .select('*')
+            .eq('name', name)
+            .maybeSingle();
+
+        if (error) {
+            console.error('[Dispatch] Error obteniendo georef de barrio:', error);
+            return null;
+        }
+        return data; // Contiene lat, lng, etc.
+    },
+
+    /**
+     * Normaliza y guarda un barrio en el catálogo maestro (operación administrativa).
+     */
+    async saveNeighborhoodGeoref(data: { name: string, latitude: number, longitude: number, city?: string }) {
+        const { error } = await supabase
+            .from('op_neighborhoods_georef')
+            .upsert({
+                name: data.name,
+                latitude: data.latitude,
+                longitude: data.longitude,
+                city: data.city || 'Desconocida',
+                updated_at: new Date().toISOString()
+            }, { onConflict: 'name' });
+
+        return !error;
+    },
+
+    /**
+     * Sincroniza el catálogo de barrios cruzando los datos de clientes de WispHub.
+     */
+    async syncNeighborhoodsWithClients() {
+        try {
+            const whBarrios = await WisphubService.getAllClientsBarrios();
+            if (!whBarrios || whBarrios.length === 0) return { success: false, count: 0 };
+
+            console.log(`[Workflow] Sincronizando ${whBarrios.length} candidatos de barrios...`);
+
+            let newCount = 0;
+            for (const item of whBarrios) {
+                // Solo insertamos si no existe (no queremos sobreescribir coordenadas manuales con promedios de WH si ya existen)
+                const { data: existing } = await supabase
+                    .from('op_neighborhoods_georef')
+                    .select('name')
+                    .eq('name', item.name)
+                    .maybeSingle();
+
+                if (!existing) {
+                    const { error } = await supabase
+                        .from('op_neighborhoods_georef')
+                        .insert({
+                            name: item.name,
+                            latitude: item.latitude || 0,
+                            longitude: item.longitude || 0,
+                            city: 'Detectada'
+                        });
+
+                    if (!error) newCount++;
+                }
+            }
+
+            return { success: true, count: newCount };
+        } catch (error) {
+            console.error('[Workflow] Error en syncNeighborhoodsWithClients:', error);
+            return { success: false, count: 0 };
+        }
+    },
+
+    /**
+     * Elimina un barrio del catálogo.
+     */
+    async deleteNeighborhood(name: string) {
+        const { error } = await supabase
+            .from('op_neighborhoods_georef')
+            .delete()
+            .eq('name', name);
+
+        return !error;
+    },
+
+    /**
+     * Obtiene todos los barrios del catálogo con sus estadísticas.
+     */
+    async getAllNeighborhoods() {
+        const { data, error } = await supabase
+            .from('op_neighborhoods_georef')
+            .select('*')
+            .order('name', { ascending: true });
+
+        if (error) {
+            console.error('[Workflow] Error obteniendo barrios:', error);
+            return [];
+        }
+        return data;
+    }
 };

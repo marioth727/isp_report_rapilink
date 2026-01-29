@@ -14,9 +14,11 @@ import {
     Calculator,
     UserPlus,
     Loader2,
-    Camera
+    Camera,
+    Map as MapIcon
 } from 'lucide-react';
 import { InstallationChecklistManager } from '../components/InstallationChecklistManager';
+import { NeighborhoodManager } from '../components/NeighborhoodManager';
 
 interface PlanPrice {
     id: string;
@@ -104,6 +106,7 @@ export function Configuration() {
     const [editingRole, setEditingRole] = useState<'agente' | 'admin'>('agente');
     const [editingAllowedMenus, setEditingAllowedMenus] = useState<string[]>([]);
     const [currentUser, setCurrentUser] = useState<any>(null);
+    const [isNeighborhoodManagerOpen, setIsNeighborhoodManagerOpen] = useState(false);
 
     const MENU_OPTIONS = [
         "Dashboard",
@@ -563,7 +566,35 @@ Esta acción es IRREVERSIBLE y eliminará tanto su perfil como su cuenta de acce
                         <InstallationChecklistManager />
                     </div>
                 </div>
+
+                {/* 5. Logistics & Maps Section */}
+                <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4 md:col-span-2">
+                    <h3 className="text-sm font-black flex items-center gap-2 uppercase text-slate-500 tracking-widest">
+                        <MapIcon className="w-4 h-4 text-blue-600" /> Logística y Georeferencia
+                    </h3>
+                    <div className="flex flex-col md:flex-row items-center justify-between p-6 bg-slate-50 rounded-2xl border border-slate-100 gap-6">
+                        <div className="flex-1">
+                            <h4 className="text-sm font-black text-slate-900 uppercase">Catálogo de Barrios</h4>
+                            <p className="text-xs text-slate-400 font-medium mt-1">
+                                Administra las coordenadas centrales de cada barrio para la optimización de rutas del NOC.
+                                Sincroniza nombres reales directamente desde tu base de clientes.
+                            </p>
+                        </div>
+                        <button
+                            onClick={() => setIsNeighborhoodManagerOpen(true)}
+                            className="bg-white text-blue-900 px-6 py-3 rounded-xl font-bold shadow-sm border border-slate-200 hover:border-blue-300 hover:text-blue-700 transition-all active:scale-95 flex items-center gap-2 text-xs uppercase tracking-widest"
+                        >
+                            <MapIcon size={16} /> Abrir Gestor de Barrios
+                        </button>
+                    </div>
+                </div>
             </div>
+
+            {/* Modals */}
+            <NeighborhoodManager
+                isOpen={isNeighborhoodManagerOpen}
+                onClose={() => setIsNeighborhoodManagerOpen(false)}
+            />
 
             {/* 4. User Management Section (Admin Only) */}
             <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-6">
@@ -651,17 +682,34 @@ Esta acción es IRREVERSIBLE y eliminará tanto su perfil como su cuenta de acce
                                     <option value={4}>Nivel 4 (Gerencia)</option>
                                 </select>
                             </div>
-                            <div className="flex items-center gap-2 p-3 bg-slate-50 border border-slate-200 rounded-xl">
-                                <input
-                                    type="checkbox"
-                                    id="newUserIsFieldTech"
-                                    checked={newUserIsFieldTech}
-                                    onChange={(e) => setNewUserIsFieldTech(e.target.checked)}
-                                    className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-                                />
-                                <label htmlFor="newUserIsFieldTech" className="text-[10px] font-bold text-slate-600 uppercase cursor-pointer select-none">
-                                    Es Técnico de Campo (Cuadrilla)
-                                </label>
+                            <div>
+                                <label className="text-[10px] font-black text-slate-400 uppercase mb-2 block tracking-widest">Ubicación Estratégica</label>
+                                <div className="grid grid-cols-2 gap-3 p-1.5 bg-slate-100/80 backdrop-blur-sm rounded-2xl border border-slate-200/60 shadow-inner">
+                                    <button
+                                        type="button"
+                                        onClick={() => setNewUserIsFieldTech(false)}
+                                        className={clsx(
+                                            "flex items-center justify-center gap-2 py-3 rounded-xl text-[10px] font-black uppercase transition-all duration-300",
+                                            !newUserIsFieldTech
+                                                ? "bg-white text-blue-600 shadow-md shadow-blue-500/10 border-b-2 border-blue-500 transform scale-[1.02]"
+                                                : "text-slate-400 hover:text-slate-600 hover:bg-white/40"
+                                        )}
+                                    >
+                                        <span className="text-sm">🏢</span> Oficina
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => setNewUserIsFieldTech(true)}
+                                        className={clsx(
+                                            "flex items-center justify-center gap-2 py-3 rounded-xl text-[10px] font-black uppercase transition-all duration-300",
+                                            newUserIsFieldTech
+                                                ? "bg-white text-orange-600 shadow-md shadow-orange-500/10 border-b-2 border-orange-500 transform scale-[1.02]"
+                                                : "text-slate-400 hover:text-slate-600 hover:bg-white/40"
+                                        )}
+                                    >
+                                        <span className="text-sm">🚜</span> Campo
+                                    </button>
+                                </div>
                             </div>
                         </div>
 
@@ -723,99 +771,149 @@ Esta acción es IRREVERSIBLE y eliminará tanto su perfil como su cuenta de acce
                                         )}
                                     </div>
                                     {editingUserId === user.id ? (
-                                        <div className="flex flex-col gap-2 mt-2 bg-white p-4 rounded-xl border border-blue-200 shadow-sm">
-                                            <div className="flex flex-col gap-1">
-                                                <label className="text-[9px] font-black text-slate-400 uppercase">Nombre Completo</label>
-                                                <input
-                                                    type="text"
-                                                    value={editingUserName}
-                                                    onChange={(e) => setEditingUserName(e.target.value)}
-                                                    className="p-2 rounded-lg border border-slate-300 bg-white text-sm font-bold text-slate-800 outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
-                                                    autoFocus
-                                                    placeholder="Nombre completo..."
-                                                />
+                                        <div className="mt-4 bg-white p-6 rounded-2xl border border-blue-200 shadow-xl w-full">
+                                            <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+                                                {/* Basic Info */}
+                                                <div className="space-y-4 text-left">
+                                                    <div>
+                                                        <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block tracking-tight">Nombre Completo</label>
+                                                        <input
+                                                            type="text"
+                                                            value={editingUserName}
+                                                            onChange={(e) => setEditingUserName(e.target.value)}
+                                                            className="w-full p-2.5 rounded-xl border border-slate-200 bg-slate-50 text-sm font-medium focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500 transition-all outline-none"
+                                                            placeholder="Nombre completo..."
+                                                        />
+                                                    </div>
+                                                    <div>
+                                                        <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block tracking-tight">Correo de Acceso</label>
+                                                        <input
+                                                            type="email"
+                                                            value={editingEmail}
+                                                            onChange={(e) => setEditingEmail(e.target.value)}
+                                                            className="w-full p-2.5 rounded-xl border border-slate-200 bg-slate-50 text-sm font-medium focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500 transition-all outline-none"
+                                                            placeholder="Correo..."
+                                                        />
+                                                    </div>
+                                                    <div>
+                                                        <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block tracking-tight">Nueva Clave (Opcional)</label>
+                                                        <input
+                                                            type="password"
+                                                            value={editingPassword}
+                                                            onChange={(e) => setEditingPassword(e.target.value)}
+                                                            className="w-full p-2.5 rounded-xl border border-slate-200 bg-slate-50 text-sm font-medium focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500 transition-all outline-none"
+                                                            placeholder="Dejar vacío para no cambiar"
+                                                            minLength={6}
+                                                        />
+                                                    </div>
+                                                    <div>
+                                                        <label className="text-[10px] font-bold text-blue-600 uppercase mb-1 block tracking-tight">Rol del Sistema</label>
+                                                        <select
+                                                            value={editingRole}
+                                                            onChange={(e) => setEditingRole(e.target.value as 'agente' | 'admin')}
+                                                            className="w-full p-2.5 rounded-xl border border-blue-200 bg-blue-50/50 text-sm font-bold focus:ring-2 focus:ring-blue-200 transition-all outline-none text-blue-900 cursor-pointer"
+                                                        >
+                                                            <option value="agente">Agente (Consulta y CRM)</option>
+                                                            <option value="admin">Administrador (Control Total)</option>
+                                                        </select>
+                                                    </div>
+                                                </div>
+
+                                                {/* Operations & Location */}
+                                                <div className="space-y-4 text-left">
+                                                    <div>
+                                                        <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block tracking-tight">Usuario WispHub (Mapping)</label>
+                                                        <input
+                                                            type="text"
+                                                            value={editingWispHubId}
+                                                            onChange={(e) => setEditingWispHubId(e.target.value)}
+                                                            className="w-full p-2.5 rounded-xl border border-slate-200 bg-slate-50 text-sm font-medium focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500 transition-all outline-none"
+                                                            placeholder="Ej. técnico@isp"
+                                                        />
+                                                    </div>
+                                                    <div>
+                                                        <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block tracking-tight">Nivel Operativo</label>
+                                                        <select
+                                                            value={editingOperationalLevel}
+                                                            onChange={(e) => setEditingOperationalLevel(Number(e.target.value))}
+                                                            className="w-full p-2.5 rounded-xl border border-slate-200 bg-slate-50 text-sm font-bold focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500 transition-all outline-none cursor-pointer"
+                                                        >
+                                                            <option value={0}>Nivel 0 (Soporte Técnico)</option>
+                                                            <option value={1}>Nivel 1 (Técnico de Redes)</option>
+                                                            <option value={2}>Nivel 2 (Supervisor)</option>
+                                                            <option value={3}>Nivel 3 (Jefe)</option>
+                                                            <option value={4}>Nivel 4 (Gerencia)</option>
+                                                        </select>
+                                                    </div>
+                                                    <div>
+                                                        <label className="text-[10px] font-black text-slate-400 uppercase mb-2 block tracking-widest text-left">Ubicación Estratégica</label>
+                                                        <div className="grid grid-cols-2 gap-3 p-1.5 bg-slate-100/80 backdrop-blur-sm rounded-2xl border border-slate-200/60 shadow-inner">
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => setEditingIsFieldTech(false)}
+                                                                className={clsx(
+                                                                    "flex items-center justify-center gap-2 py-3 rounded-xl text-[10px] font-black uppercase transition-all duration-300",
+                                                                    !editingIsFieldTech
+                                                                        ? "bg-white text-blue-600 shadow-md shadow-blue-500/10 border-b-2 border-blue-500 transform scale-[1.02]"
+                                                                        : "text-slate-400 hover:text-slate-600 hover:bg-white/40"
+                                                                )}
+                                                            >
+                                                                <span className="text-sm">🏢</span> Oficina
+                                                            </button>
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => setEditingIsFieldTech(true)}
+                                                                className={clsx(
+                                                                    "flex items-center justify-center gap-2 py-3 rounded-xl text-[10px] font-black uppercase transition-all duration-300",
+                                                                    editingIsFieldTech
+                                                                        ? "bg-white text-orange-600 shadow-md shadow-orange-500/10 border-b-2 border-orange-500 transform scale-[1.02]"
+                                                                        : "text-slate-400 hover:text-slate-600 hover:bg-white/40"
+                                                                )}
+                                                            >
+                                                                <span className="text-sm">🚜</span> Campo
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                {/* Permissions Sidebar */}
+                                                <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 text-left">
+                                                    <label className="text-[10px] font-bold text-slate-400 uppercase mb-3 block tracking-widest">Permisos de Menú</label>
+                                                    <div className="grid grid-cols-1 gap-2">
+                                                        {MENU_OPTIONS.map(menu => (
+                                                            <label key={menu} className="flex items-center gap-3 text-xs cursor-pointer group p-1 hover:bg-white rounded-lg transition-colors">
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked={editingAllowedMenus.includes(menu)}
+                                                                    onChange={(e) => {
+                                                                        if (e.target.checked) {
+                                                                            setEditingAllowedMenus([...editingAllowedMenus, menu]);
+                                                                        } else {
+                                                                            setEditingAllowedMenus(editingAllowedMenus.filter(m => m !== menu));
+                                                                        }
+                                                                    }}
+                                                                    className="w-3.5 h-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                                                                />
+                                                                <span className="font-bold text-slate-700 group-hover:text-blue-600 transition-colors uppercase text-[10px] tracking-wide">{menu}</span>
+                                                            </label>
+                                                        ))}
+                                                    </div>
+                                                </div>
                                             </div>
-                                            <div className="flex flex-col gap-1">
-                                                <label className="text-[9px] font-black text-slate-400 uppercase">Usuario de WispHub (Mapping)</label>
-                                                <input
-                                                    type="text"
-                                                    value={editingWispHubId}
-                                                    onChange={(e) => setEditingWispHubId(e.target.value)}
-                                                    className="p-2 rounded-lg border border-slate-300 bg-white text-sm font-bold outline-none"
-                                                    placeholder="Ej. admin@rapilink-sas"
-                                                />
-                                            </div>
-                                            <div className="grid grid-cols-2 gap-2">
-                                                <div className="flex flex-col gap-1">
-                                                    <label className="text-[9px] font-black text-blue-500 uppercase">Correo</label>
-                                                    <input
-                                                        type="email"
-                                                        value={editingEmail}
-                                                        onChange={(e) => setEditingEmail(e.target.value)}
-                                                        className="p-2 rounded-lg border border-blue-200 bg-blue-50 text-sm font-bold outline-none"
-                                                        placeholder="Correo de acceso..."
-                                                    />
-                                                </div>
-                                                <div className="flex flex-col gap-1">
-                                                    <label className="text-[9px] font-black text-blue-500 uppercase">Nueva Clave</label>
-                                                    <input
-                                                        type="password"
-                                                        value={editingPassword}
-                                                        onChange={(e) => setEditingPassword(e.target.value)}
-                                                        className="p-2 rounded-lg border border-blue-200 bg-blue-50 text-sm font-bold outline-none"
-                                                        placeholder="Opcional (si deseas cambiarla)"
-                                                        minLength={6}
-                                                    />
-                                                </div>
-                                            </div>
-                                            <div className="grid grid-cols-2 gap-2">
-                                                <div className="flex flex-col gap-1">
-                                                    <label className="text-[9px] font-black text-slate-400 uppercase">Rol de Usuario</label>
-                                                    <select
-                                                        value={editingRole}
-                                                        onChange={(e) => setEditingRole(e.target.value as 'agente' | 'admin')}
-                                                        className="p-2 rounded-lg border border-slate-300 bg-white text-sm font-bold outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
-                                                    >
-                                                        <option value="agente">👤 Agente (Estándar)</option>
-                                                        <option value="admin">🛡️ Admin (Control Total)</option>
-                                                    </select>
-                                                </div>
-                                                <div className="flex flex-col gap-1">
-                                                    <label className="text-[9px] font-black text-slate-400 uppercase">Nivel Operativo</label>
-                                                    <select
-                                                        value={editingOperationalLevel}
-                                                        onChange={(e) => setEditingOperationalLevel(Number(e.target.value))}
-                                                        className="p-2 rounded-lg border border-slate-300 bg-white text-sm font-bold outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
-                                                    >
-                                                        <option value={0}>Nivel 0 (Soporte Técnico)</option>
-                                                        <option value={1}>Nivel 1 (Técnico de Redes)</option>
-                                                        <option value={2}>Nivel 2 (Supervisor de Operaciones)</option>
-                                                        <option value={3}>Nivel 3 (Jefe de Operaciones)</option>
-                                                        <option value={4}>Nivel 4 (Gerente de Operaciones)</option>
-                                                    </select>
-                                                </div>
-                                            </div>
-                                            <div className="flex flex-col gap-2 mt-2">
-                                                <label className="text-[9px] font-black text-slate-400 uppercase">Permisos de Menú</label>
-                                                <div className="grid grid-cols-2 gap-2">
-                                                    {MENU_OPTIONS.map(menu => (
-                                                        <label key={menu} className="flex items-center gap-2 text-xs cursor-pointer group select-none">
-                                                            <input
-                                                                type="checkbox"
-                                                                checked={editingAllowedMenus.includes(menu)}
-                                                                onChange={(e) => {
-                                                                    if (e.target.checked) {
-                                                                        setEditingAllowedMenus([...editingAllowedMenus, menu]);
-                                                                    } else {
-                                                                        setEditingAllowedMenus(editingAllowedMenus.filter(m => m !== menu));
-                                                                    }
-                                                                }}
-                                                                className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-                                                            />
-                                                            <span className="font-bold text-slate-600 group-hover:text-blue-600 transition-colors uppercase text-[10px]">{menu}</span>
-                                                        </label>
-                                                    ))}
-                                                </div>
+
+                                            <div className="flex justify-end gap-3 mt-6 pt-4 border-t border-slate-100">
+                                                <button
+                                                    onClick={() => setEditingUserId(null)}
+                                                    className="px-6 py-2.5 bg-slate-100 text-slate-500 hover:bg-slate-200 text-xs font-black rounded-xl uppercase transition-all"
+                                                >
+                                                    Cancelar
+                                                </button>
+                                                <button
+                                                    onClick={() => handleUpdateUser(user.id)}
+                                                    className="px-8 py-2.5 bg-emerald-600 text-white hover:bg-emerald-700 text-xs font-black rounded-xl uppercase shadow-lg shadow-emerald-500/20 transition-all active:scale-95 flex items-center gap-2"
+                                                >
+                                                    <Save className="w-4 h-4" /> Guardar Cambios
+                                                </button>
                                             </div>
                                         </div>
                                     ) : (
@@ -835,8 +933,12 @@ Esta acción es IRREVERSIBLE y eliminará tanto su perfil como su cuenta de acce
                                                 )}>
                                                     N{user.operational_level !== undefined ? user.operational_level : 0}
                                                 </span>
-                                                {user.is_field_tech && (
-                                                    <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-orange-100 text-orange-700 border border-orange-200 uppercase">
+                                                {!user.is_field_tech ? (
+                                                    <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200 uppercase flex items-center gap-1">
+                                                        🏢 Oficina
+                                                    </span>
+                                                ) : (
+                                                    <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-orange-50 text-orange-700 border border-orange-200 uppercase flex items-center gap-1">
                                                         🚜 Campo
                                                     </span>
                                                 )}
@@ -850,22 +952,7 @@ Esta acción es IRREVERSIBLE y eliminará tanto su perfil como su cuenta de acce
                                     )}
                                 </div>
                                 <div className="flex gap-2">
-                                    {editingUserId === user.id ? (
-                                        <div className="flex flex-col gap-2">
-                                            <button
-                                                onClick={() => handleUpdateUser(user.id)}
-                                                className="px-3 py-1.5 bg-emerald-500 text-white hover:bg-emerald-600 text-[10px] font-black rounded-lg uppercase shadow-sm transition-all"
-                                            >
-                                                Guardar
-                                            </button>
-                                            <button
-                                                onClick={() => setEditingUserId(null)}
-                                                className="px-3 py-1.5 bg-slate-100 text-slate-500 hover:bg-slate-200 text-[10px] font-black rounded-lg uppercase transition-all"
-                                            >
-                                                Cancelar
-                                            </button>
-                                        </div>
-                                    ) : (
+                                    {editingUserId !== user.id && (
                                         <div className="flex gap-2">
                                             <button
                                                 onClick={() => {

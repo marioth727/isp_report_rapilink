@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo } from 'react';
 import useSWR from 'swr';
-import { WisphubService } from '../lib/wisphub';
+import { WisphubService, whNormalize } from '../lib/wisphub';
 import {
     AlertTriangle,
     Clock,
@@ -189,9 +189,11 @@ export function OperationsDashboard() {
                         activeFilter === 'riesgo' ? t.sla_status === 'amarillo' :
                             activeFilter === 'dia' ? t.sla_status === 'verde' : true;
 
-            const matchesSubject = filterSubject ? t.asunto === filterSubject : true;
+            const matchesSubject = filterSubject ?
+                whNormalize(t.asunto) === whNormalize(filterSubject) : true;
 
-            const matchesTechnician = filterTechnician ? (t.nombre_tecnico || 'Sin asignar') === filterTechnician : true;
+            const matchesTechnician = filterTechnician ?
+                whNormalize(t.nombre_tecnico || 'Sin asignar') === whNormalize(filterTechnician) : true;
 
             // Status Filter (Nuevo / En Proceso)
             const matchesStatus =

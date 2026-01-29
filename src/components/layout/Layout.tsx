@@ -441,6 +441,7 @@ export function Layout() {
             title: 'Gestión Operativa',
             icon: Shield,
             items: [
+                { to: '/operaciones/despacho', icon: Truck, label: 'Despacho Inteligente' },
                 { to: '/operaciones/productividad', icon: BarChart3, label: 'Productividad' },
                 { to: '/operaciones/trazabilidad', icon: Clock, label: 'Control de Trazabilidad' },
             ]

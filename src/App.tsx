@@ -14,6 +14,7 @@ import { CampaignManager } from './pages/CampaignManager';
 import { OperationsDashboard } from './pages/OperationsDashboard';
 import { TechnicianAnalytics } from './pages/TechnicianAnalytics';
 import { OperationsHub } from './pages/OperationsHub';
+import { OperationsDispatch } from './pages/OperationsDispatch';
 import { OperationsProductivity } from './pages/OperationsProductivity';
 import { OperationsMyTasks } from './pages/OperationsMyTasks';
 import { OperationsSupervision } from './pages/OperationsSupervision';
@@ -70,6 +71,7 @@ function App() {
           <Route path="/gestion" element={<InteractionLog />} />
           <Route path="/campanas" element={<CampaignManager />} />
           <Route path="/operaciones/hub" element={<OperationsHub />} />
+          <Route path="/operaciones/despacho" element={<OperationsDispatch />} />
           <Route path="/operaciones/productividad" element={<OperationsProductivity />} />
           <Route path="/operaciones/mis-tareas" element={<OperationsMyTasks />} />
           <Route path="/operaciones/supervision" element={<OperationsSupervision />} />
