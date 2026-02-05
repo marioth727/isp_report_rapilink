@@ -1,28 +1,54 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import useSWR from 'swr';
 import {
-    Truck,
-    MapPin,
-    AlertCircle,
-    Clock,
     Search,
-    Calendar,
-    Loader2,
-    X,
-    Phone,
-    ExternalLink,
-    FileText,
+    Truck,
+    AlertCircle,
     User,
-    LayoutList,
-    Map as MapIcon
+    MapPin,
+    Phone,
+    FileText,
+    X,
+    Loader2,
+    ExternalLink,
+    ChevronDown,
+    CloudUpload,
+    CloudDownload
 } from 'lucide-react';
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd';
 import type { DropResult } from '@hello-pangea/dnd';
+
+// Componente Portal para evitar el recorte de los tickets durante el arrastre
+const Portal = ({ children }: { children: React.ReactNode }) => {
+    return createPortal(children, document.body);
+};
+
+// Función para crear marcadores personalizados con conteo
+const createClusterIcon = (count: number) => {
+    return L.divIcon({
+        className: 'custom-cluster-icon',
+        html: `
+            <div class="relative flex items-center justify-center" style="width: 32px; height: 36px;">
+                <div class="absolute top-0 w-8 h-8 bg-primary/20 rounded-full animate-ping"></div>
+                <div class="relative w-8 h-8 bg-primary border-2 border-white rounded-full flex items-center justify-center shadow-xl">
+                    <span class="text-[10px] font-black text-white">${count}</span>
+                </div>
+                <!-- Punta del marcador -->
+                <div class="absolute bottom-1 left-1/2 -translate-x-1/2 w-2 h-2 bg-primary rotate-45 border-r border-b border-white"></div>
+            </div>
+        `,
+        iconSize: [32, 36],
+        iconAnchor: [16, 36],
+        popupAnchor: [0, -36]
+    });
+};
 import { WorkflowService } from '../lib/workflowService';
 import { WisphubService } from '../lib/wisphub';
+import { OperationalTimeline } from './OperationalTimeline';
 import clsx from 'clsx';
 
 interface DispatchTicket {
@@ -47,6 +73,12 @@ interface DispatchTicket {
     tecnico_actual?: string;
     usuario_wisphub?: string;
     cedula?: string;
+    latitud?: string;
+    longitud?: string;
+    // Campos de tracking (WispHub API)
+    fecha_inicio?: string;
+    fecha_fin?: string;
+    estado?: string;
 }
 
 export function OperationsDispatch() {
@@ -57,8 +89,15 @@ export function OperationsDispatch() {
     const [neighborhoods, setNeighborhoods] = useState<Record<string, any>>({});
     const [selectedTicket, setSelectedTicket] = useState<DispatchTicket | null>(null);
     const [detailLoading, setDetailLoading] = useState(false);
-    const [viewMode, setViewMode] = useState<'list' | 'map'>('list');
     const [mapFilter, setMapFilter] = useState<string | null>(null);
+    const [activeView, setActiveView] = useState<'dispatch' | 'timeline'>('dispatch');
+
+    // Filtros Operativos
+    const [filterTechId, setFilterTechId] = useState<string>('all');
+    const [showInstallations, setShowInstallations] = useState<boolean>(false);
+
+    // Ref para control del mapa
+    const mapRef = useRef<L.Map | null>(null);
 
     // Corregir iconos de Leaflet
     useEffect(() => {
@@ -189,52 +228,115 @@ export function OperationsDispatch() {
     };
 
 
+    // ==================== UTILIDADES DE FILTRADO ====================
+    const normalize = (text: string) => text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+
+    // Tickets filtrados (usados en Lista y Mapa)
+    const filteredTickets = useMemo(() => {
+        return tickets.filter(t => {
+            // Filtro por Buscador
+            const matchesSearch = !searchQuery ||
+                normalize(t.nombre_cliente).includes(normalize(searchQuery)) ||
+                normalize(t.barrio).includes(normalize(searchQuery));
+
+            // Filtro por Técnico (Dropdown) - Buscamos por nombre ya que WispHub devuelve nombres
+            const selectedTech = technicians.find(tech => tech.id === filterTechId);
+            const matchesTech = filterTechId === 'all' ||
+                (selectedTech?.full_name && t.tecnico_actual && normalize(t.tecnico_actual).includes(normalize(selectedTech.full_name)));
+
+
+            // Filtro por Instalación - Restringido al técnico de instalaciones según memoria técnica
+            const isInstallationTech = t.tecnico_actual && (
+                normalize(t.tecnico_actual).includes('instalaciones@rapilink-sas') ||
+                normalize(t.tecnico_actual).includes('instalaciones')
+            );
+            const matchesInstall = !showInstallations || isInstallationTech;
+
+            // Filtro por Mapa (Barrio seleccionado)
+            const matchesMap = !mapFilter || t.barrio === mapFilter;
+
+            return matchesSearch && matchesTech && matchesInstall && matchesMap;
+        });
+    }, [tickets, searchQuery, filterTechId, showInstallations, mapFilter, technicians]);
+
+    // Agrupar tickets por barrio para el mapa
+    const ticketsByNeighborhood = useMemo(() => {
+        return filteredTickets.reduce((acc, t) => {
+            if (!t.barrio || t.barrio === 'Sin Barrio') return acc;
+            if (!acc[t.barrio]) acc[t.barrio] = [];
+            acc[t.barrio].push(t);
+            return acc;
+        }, {} as Record<string, DispatchTicket[]>);
+    }, [filteredTickets]);
+
+
+    // ==================== ANIMACIÓN DE MAPA ====================
+    const calculateBounds = useCallback(() => {
+        const visibleMarkers = filteredTickets.filter(t =>
+            neighborhoods[t.barrio]?.latitude && neighborhoods[t.barrio]?.longitude
+        );
+
+        if (visibleMarkers.length === 0) return null;
+
+        const coords = visibleMarkers.map(t => [
+            Number(neighborhoods[t.barrio].latitude),
+            Number(neighborhoods[t.barrio].longitude)
+        ] as [number, number]);
+
+        return L.latLngBounds(coords);
+    }, [filteredTickets, neighborhoods]);
+
+    useEffect(() => {
+        if (!mapRef.current || activeView !== 'dispatch') return; // Only adjust bounds if dispatch view is active
+        const bounds = calculateBounds();
+        if (bounds) {
+            mapRef.current.flyToBounds(bounds, { padding: [50, 50], duration: 1 });
+        }
+    }, [calculateBounds, activeView]);
+
+
+    // ==================== DRAG & DROP FIX ====================
     const onDragEnd = (result: DropResult) => {
-        const { source, destination } = result;
+        const { source, destination, draggableId } = result;
         if (!destination) return;
 
         // Mismo lugar
         if (source.droppableId === destination.droppableId && source.index === destination.index) return;
 
-        let sourceList: DispatchTicket[] = [];
-        let destList: DispatchTicket[] = [];
-
-        // Identificar origen
+        // Buscar el ticket por ID
+        let movedItem: DispatchTicket | undefined;
         if (source.droppableId === 'unassigned') {
-            sourceList = [...tickets];
+            movedItem = tickets.find(t => t.id === draggableId);
         } else {
-            sourceList = [...assignedRoutes[source.droppableId]];
+            movedItem = assignedRoutes[source.droppableId]?.find(t => t.id === draggableId);
         }
 
-        // Remover item
-        const [movedItem] = sourceList.splice(source.index, 1);
+        if (!movedItem) {
+            console.error('❌ [Drag] No se encontró el ticket:', draggableId);
+            return;
+        }
 
-        // Identificar destino
+        // Remover del origen
+        if (source.droppableId === 'unassigned') {
+            setTickets(prev => prev.filter(t => t.id !== draggableId));
+        } else {
+            setAssignedRoutes(prev => ({
+                ...prev,
+                [source.droppableId]: prev[source.droppableId].filter(t => t.id !== draggableId)
+            }));
+        }
+
+        // Agregar al destino
         if (destination.droppableId === 'unassigned') {
-            destList = [...tickets];
-            destList.splice(destination.index, 0, movedItem);
-            setTickets(destList);
+            setTickets(prev => [...prev, movedItem!]);
         } else {
-            destList = [...assignedRoutes[destination.droppableId]];
-            destList.splice(destination.index, 0, movedItem);
-            setAssignedRoutes({
-                ...assignedRoutes,
-                [destination.droppableId]: destList
-            });
+            setAssignedRoutes(prev => ({
+                ...prev,
+                [destination.droppableId]: [...(prev[destination.droppableId] || []), movedItem!]
+            }));
         }
 
-        // Actualizar origen si no es el mismo que destino
-        if (source.droppableId !== destination.droppableId) {
-            if (source.droppableId === 'unassigned') {
-                setTickets(sourceList);
-            } else {
-                setAssignedRoutes({
-                    ...assignedRoutes,
-                    [source.droppableId]: sourceList,
-                    [destination.droppableId]: destList
-                });
-            }
-        }
+        console.log(`✅ [Drag] Movido ${movedItem.nombre_cliente} a ${destination.droppableId}`);
     };
 
     const handlePublish = async () => {
@@ -314,524 +416,577 @@ export function OperationsDispatch() {
     }
 
     return (
-        <div className="space-y-8 animate-in fade-in duration-700 pb-20">
-            {/* Header */}
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
-                <div>
-                    <h1 className="text-3xl font-black tracking-tight text-foreground uppercase flex items-center gap-3">
-                        <Truck className="text-primary" size={32} />
-                        Despacho & Logística
-                    </h1>
-                    <p className="text-muted-foreground font-medium text-sm">Optimización de rutas y georreferencia técnica en tiempo real.</p>
-                </div>
-                <div className="flex items-center gap-4">
-                    <div className="flex items-center gap-3">
-                        <div className="hidden md:flex flex-col items-end">
-                            <span className="text-[10px] font-black uppercase text-muted-foreground leading-none">WispHub Sync</span>
-                            <span className="text-[10px] font-bold text-primary tabular-nums">Auto-refresca @ 5m</span>
-                        </div>
-                        <button
-                            onClick={() => {
-                                setLoading(true);
-                                mutateTickets();
-                            }}
-                            className="bg-primary/10 hover:bg-primary/20 text-primary p-2 rounded-xl transition-all border border-primary/20 flex items-center gap-2"
-                            title="Sincronizar ahora con WispHub"
-                        >
-                            <Truck className="w-5 h-5" />
-                            <span className="text-[10px] font-black uppercase pr-1">Refrescar</span>
-                        </button>
-                    </div>
-
-                    <div className="bg-card border-2 border-border px-4 py-2 rounded-2xl flex items-center gap-4 shadow-sm">
-                        <div className="flex flex-col items-center">
-                            <span className="text-[10px] font-black text-muted-foreground uppercase">Tickets</span>
-                            <span className="text-lg font-black text-primary">{tickets.length}</span>
-                        </div>
-                        <div className="w-px h-8 bg-border" />
-                        <div className="flex flex-col items-center">
-                            <span className="text-[10px] font-black text-muted-foreground uppercase">Técnicos</span>
-                            <span className="text-lg font-black text-foreground">{technicians.length}</span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
+        <div className="animate-in fade-in duration-700 h-full w-full overflow-hidden relative bg-slate-900">
             <DragDropContext onDragEnd={onDragEnd}>
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
 
-                    {/* Columna Izquierda: POOL DE TICKETS */}
-                    <div className="lg:col-span-4 space-y-4">
-                        <div className="bg-card border-2 border-border rounded-[2rem] p-6 flex flex-col h-[750px]">
-                            <div className="flex items-center justify-between mb-6">
-                                <h3 className="text-sm font-black uppercase tracking-widest flex items-center gap-2 text-foreground">
-                                    <AlertCircle size={18} className="text-orange-500" /> Pool de Pendientes
-                                </h3>
-                                <div className="flex bg-muted rounded-xl p-1 border border-border">
-                                    <button
-                                        onClick={() => setViewMode('list')}
-                                        className={clsx(
-                                            "p-1.5 rounded-lg transition-all",
-                                            viewMode === 'list' ? "bg-white text-primary shadow-sm" : "text-muted-foreground hover:text-foreground"
-                                        )}
-                                        title="Vista Lista"
-                                    >
-                                        <LayoutList size={16} />
-                                    </button>
-                                    <button
-                                        onClick={() => setViewMode('map')}
-                                        className={clsx(
-                                            "p-1.5 rounded-lg transition-all",
-                                            viewMode === 'map' ? "bg-white text-primary shadow-sm" : "text-muted-foreground hover:text-foreground"
-                                        )}
-                                        title="Vista Mapa"
-                                    >
-                                        <MapIcon size={16} />
-                                    </button>
-                                </div>
-                            </div>
-
-                            <div className="relative mb-4">
-                                <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" size={14} />
-                                <input
-                                    type="text"
-                                    placeholder="Buscar cliente o barrio..."
-                                    value={searchQuery}
-                                    onChange={(e) => setSearchQuery(e.target.value)}
-                                    className="w-full bg-muted/50 border border-border rounded-xl py-2 pl-9 pr-4 text-xs outline-none focus:ring-2 focus:ring-primary/20 transition-all font-bold"
-                                />
-                                {mapFilter && (
-                                    <button
-                                        onClick={() => setMapFilter(null)}
-                                        className="absolute right-3 top-1/2 -translate-y-1/2 text-[9px] font-black uppercase text-primary hover:text-primary/70 transition-colors"
-                                    >
-                                        Limpiar Mapa
-                                    </button>
-                                )}
-                            </div>
-
-                            <Droppable droppableId="unassigned">
-                                {(provided) => (
-                                    <div
-                                        {...provided.droppableProps}
-                                        ref={provided.innerRef}
-                                        className="flex-1 overflow-y-auto custom-scrollbar space-y-3 pr-2"
-                                    >
-                                        {viewMode === 'map' ? (
-                                            <div className="h-full rounded-2xl overflow-hidden relative border border-border">
-                                                <MapContainer
-                                                    center={[10.9685, -74.7813]}
-                                                    zoom={12}
-                                                    style={{ height: '100%', width: '100%' }}
-                                                >
-                                                    <TileLayer
-                                                        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-                                                        url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                                                    />
-                                                    {Object.entries(
-                                                        tickets.reduce((acc, t) => {
-                                                            if (!t.barrio || t.barrio === 'Sin Barrio') return acc;
-                                                            if (!acc[t.barrio]) acc[t.barrio] = { count: 0, lat: neighborhoods[t.barrio]?.latitude, lng: neighborhoods[t.barrio]?.longitude };
-                                                            acc[t.barrio].count++;
-                                                            return acc;
-                                                        }, {} as Record<string, { count: number; lat?: number; lng?: number }>)
-                                                    ).map(([bName, data]) => (
-                                                        data.lat && data.lng && (
-                                                            <Marker
-                                                                key={bName}
-                                                                position={[data.lat, data.lng]}
-                                                                eventHandlers={{
-                                                                    click: () => setMapFilter(bName)
-                                                                }}
-                                                            >
-                                                                <Popup>
-                                                                    <div className="p-2 text-center">
-                                                                        <p className="text-[10px] font-black uppercase mb-1">{bName}</p>
-                                                                        <div className="bg-primary text-white text-[10px] font-black px-2 py-1 rounded-full">
-                                                                            {data.count} Tickets
-                                                                        </div>
-                                                                    </div>
-                                                                </Popup>
-                                                            </Marker>
-                                                        )
-                                                    ))}
-                                                </MapContainer>
-                                                <div className="absolute top-2 left-2 z-[1000] bg-white/90 backdrop-blur-sm p-2 rounded-lg border border-border shadow-lg">
-                                                    <p className="text-[8px] font-black uppercase text-primary">Vista Geográfica NOC</p>
-                                                    <p className="text-[7px] font-bold text-muted-foreground uppercase leading-none">Toca un marcador para ver tickets</p>
-                                                </div>
-                                            </div>
-                                        ) : (
-                                            <div className="space-y-3">
-                                                {tickets
-                                                    .filter(t => {
-                                                        const matchesSearch = t.nombre_cliente.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                                                            t.barrio.toLowerCase().includes(searchQuery.toLowerCase());
-                                                        const matchesMap = !mapFilter || t.barrio === mapFilter;
-                                                        return matchesSearch && matchesMap;
-                                                    })
-                                                    .map((ticket, index) => (
-                                                        <Draggable key={ticket.id} draggableId={ticket.id} index={index}>
-                                                            {(provided, snapshot) => (
-                                                                <div
-                                                                    ref={provided.innerRef}
-                                                                    {...provided.draggableProps}
-                                                                    {...provided.dragHandleProps}
-                                                                    className={clsx(
-                                                                        "p-4 bg-muted/30 border-2 rounded-2xl transition-all cursor-pointer",
-                                                                        snapshot.isDragging ? "border-primary shadow-2xl scale-105 bg-card" : "border-border hover:border-primary/40 hover:bg-card shadow-sm"
-                                                                    )}
-                                                                    onClick={() => setSelectedTicket(ticket)}
-                                                                >
-                                                                    <div className="flex justify-between items-start mb-2">
-                                                                        <div className="space-y-1">
-                                                                            <p className="text-[10px] font-black uppercase text-muted-foreground truncate max-w-[150px]">
-                                                                                {ticket.asunto}
-                                                                            </p>
-                                                                            <h4 className="text-xs font-black uppercase text-foreground leading-tight">
-                                                                                {ticket.nombre_cliente}
-                                                                            </h4>
-                                                                        </div>
-                                                                        <div className="flex flex-col items-end gap-1">
-                                                                            <div className={clsx(
-                                                                                "px-2 py-1 rounded-lg text-[9px] font-black uppercase",
-                                                                                ticket.score > 200 ? "bg-red-500/10 text-red-500" :
-                                                                                    ticket.score > 100 ? "bg-orange-500/10 text-orange-500" : "bg-emerald-500/10 text-emerald-500"
-                                                                            )}>
-                                                                                Score: {ticket.score}
-                                                                            </div>
-                                                                            {ticket.prioridad && (
-                                                                                <div className={clsx(
-                                                                                    "px-1.5 py-0.5 rounded text-[7px] font-bold border whitespace-nowrap",
-                                                                                    ticket.id_prioridad >= 4 ? "bg-red-50 border-red-200 text-red-600" :
-                                                                                        ticket.id_prioridad === 3 ? "bg-orange-50 border-orange-200 text-orange-600" :
-                                                                                            "bg-blue-50 border-blue-200 text-blue-600"
-                                                                                )}>
-                                                                                    {ticket.prioridad}
-                                                                                </div>
-                                                                            )}
-                                                                        </div>
-                                                                    </div>
-
-                                                                    <div className="flex items-center gap-3 mt-3">
-                                                                        <div className="flex items-center gap-1 text-[9px] font-bold text-muted-foreground uppercase">
-                                                                            <MapPin size={10} className={neighborhoods[ticket.barrio] ? "text-primary" : "text-muted-foreground"} />
-                                                                            {ticket.barrio}
-                                                                        </div>
-                                                                        <div className="w-1 h-1 rounded-full bg-border" />
-                                                                        <div className="flex items-center gap-1 text-[9px] font-bold text-muted-foreground uppercase">
-                                                                            <Clock size={10} />
-                                                                            {ticket.horas_abierto}h
-                                                                        </div>
-                                                                        {ticket.recurrence > 1 && (
-                                                                            <>
-                                                                                <div className="w-1 h-1 rounded-full bg-border" />
-                                                                                <div className="flex items-center gap-1 text-[9px] font-black text-red-500 uppercase">
-                                                                                    <AlertCircle size={10} />
-                                                                                    {ticket.recurrence}ª Visita
-                                                                                </div>
-                                                                            </>
-                                                                        )}
-                                                                    </div>
-                                                                </div>
-                                                            )}
-                                                        </Draggable>
-                                                    ))}
-                                            </div>
-                                        )}
-                                        {provided.placeholder}
-                                    </div>
-                                )}
-                            </Droppable>
-                        </div>
-                    </div>
-
-                    {/* Columna Derecha: RUTAS POR TÉCNICO */}
-                    <div className="lg:col-span-8 space-y-6">
-                        <div className="bg-primary/5 border border-primary/20 rounded-3xl p-6 flex items-center justify-between">
-                            <div className="flex items-center gap-4">
-                                <div className="p-3 bg-primary text-white rounded-2xl shadow-lg shadow-primary/20">
-                                    <Calendar size={24} />
-                                </div>
-                                <div>
-                                    <h4 className="text-lg font-black uppercase tracking-tight text-foreground">Planeación para Mañana</h4>
-                                    <p className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">Organiza las rutas arrastrando los tickets a cada técnico.</p>
-                                </div>
-                            </div>
-                            <button
-                                onClick={handlePublish}
-                                className="px-6 py-2.5 bg-foreground text-background rounded-2xl text-xs font-black uppercase tracking-widest hover:scale-105 active:scale-95 transition-all shadow-xl shadow-foreground/10"
+                {/* CAPA 0: MAPA BASE (FULLSCREEN) */}
+                <div className="absolute inset-0 z-0">
+                    <div className="w-full h-full relative overflow-hidden">
+                        {activeView === 'dispatch' ? (
+                            <MapContainer
+                                ref={mapRef}
+                                center={[10.9685, -74.7813]} // Default center for Barranquilla
+                                zoom={12}
+                                style={{ height: '100%', width: '100%' }}
+                                zoomControl={false}
+                                className="z-0"
                             >
-                                Publicar Despacho
+                                <TileLayer
+                                    attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+                                    url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
+                                />
+                                {Object.entries(ticketsByNeighborhood).map(([bName, ticketsInNeighborhood]) => {
+                                    const data = {
+                                        count: ticketsInNeighborhood.length,
+                                        lat: neighborhoods[bName]?.latitude,
+                                        lng: neighborhoods[bName]?.longitude
+                                    };
+                                    if (!data.lat || !data.lng) return null;
+
+                                    return (
+                                        <Marker
+                                            key={bName}
+                                            position={[data.lat, data.lng]}
+                                            icon={createClusterIcon(data.count)}
+                                            eventHandlers={{
+                                                click: () => setMapFilter(bName)
+                                            }}
+                                        >
+                                            <Popup className="noc-popup">
+                                                <div className="p-3 text-center min-w-[120px]">
+                                                    <p className="text-[10px] font-black uppercase text-slate-400 mb-1">{bName}</p>
+                                                    <div className="bg-primary/10 text-primary text-[10px] font-black py-2 px-3 rounded-xl border border-primary/20">
+                                                        {data.count} Reportes activos
+                                                    </div>
+                                                </div>
+                                            </Popup>
+                                        </Marker>
+                                    );
+                                })}
+                            </MapContainer>
+                        ) : (
+                            <div className="w-full h-full overflow-y-auto custom-scrollbar pt-40 px-6 bg-slate-50">
+                                <OperationalTimeline
+                                    tickets={filteredTickets}
+                                    fieldTechnicians={technicians}
+                                />
+                            </div>
+                        )}
+                    </div>
+                </div>
+
+                {/* CAPA 1: OVERLAY DE WIDGETS */}
+                <div className="absolute inset-0 z-10 p-3 md:p-4 pointer-events-none overflow-hidden">
+                    {/* CAPA 1.1: ENCABEZADO FLOTANTE (CENTRAL) */}
+                    <div className="absolute top-6 left-1/2 -translate-x-1/2 z-[200] flex flex-col items-center gap-3 w-full pointer-events-none">
+                        <div className="bg-white/80 backdrop-blur-3xl px-10 py-4 rounded-[2.5rem] border border-white/50 shadow-[0_20px_50px_rgba(0,0,0,0.1)] flex items-center gap-6 pointer-events-auto transition-all hover:shadow-[0_25px_60px_rgba(0,0,0,0.15)]">
+                            <div className="flex items-center gap-4">
+                                <div className="flex items-center gap-2 px-3 py-1 bg-emerald-50 rounded-full border border-emerald-100">
+                                    <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.6)]" />
+                                    <span className="text-[8px] font-black text-emerald-600 uppercase tracking-widest">En Vivo</span>
+                                </div>
+                                <h1 className="text-3xl font-[1000] uppercase tracking-[-0.05em] text-slate-900 leading-none">
+                                    Centro de Despacho
+                                </h1>
+                            </div>
+
+                            {/* BENTO STATS INTEGRATED */}
+                            <div className="flex items-center gap-6 pl-6 border-l border-slate-200">
+                                <div className="text-center">
+                                    <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest mb-0.5 leading-none">Barrios</p>
+                                    <p className="text-xl font-black text-slate-800 tracking-tighter leading-none">{Object.keys(neighborhoods).length}</p>
+                                </div>
+                                <div className="text-center">
+                                    <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest mb-0.5 leading-none">Tickets</p>
+                                    <p className="text-xl font-black text-slate-800 tracking-tighter leading-none">{filteredTickets.length}</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* SELECTOR DE VISTA (TABS) */}
+                        <div className="bg-slate-100/50 backdrop-blur-xl p-1 rounded-2xl flex gap-1 pointer-events-auto border border-slate-200">
+                            <button
+                                onClick={() => setActiveView('dispatch')}
+                                className={clsx(
+                                    "px-6 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all",
+                                    activeView === 'dispatch' ? "bg-white text-primary shadow-sm" : "text-slate-400 hover:text-slate-600"
+                                )}
+                            >
+                                Mapa de Despacho
+                            </button>
+                            <button
+                                onClick={() => setActiveView('timeline')}
+                                className={clsx(
+                                    "px-6 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all",
+                                    activeView === 'timeline' ? "bg-white text-primary shadow-sm" : "text-slate-400 hover:text-slate-600"
+                                )}
+                            >
+                                Jornada Operativa
                             </button>
                         </div>
-
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            {technicians.map((tech) => (
-                                <div key={tech.id} className="bg-card border-2 border-border rounded-[2.5rem] p-6 flex flex-col h-[500px]">
-                                    <div className="flex items-center justify-between mb-4">
-                                        <div className="flex items-center gap-3">
-                                            <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center text-primary font-black uppercase">
-                                                {tech.full_name?.substring(0, 2)}
-                                            </div>
-                                            <div>
-                                                <h4 className="text-sm font-black uppercase">{tech.full_name}</h4>
-                                                <p className="text-[9px] font-bold text-muted-foreground uppercase tracking-widest">Zona: {(tech as any).location || 'Norte'}</p>
-                                            </div>
-                                        </div>
-                                        <div className="text-[10px] font-black bg-muted px-2 py-1 rounded-lg">
-                                            {assignedRoutes[tech.id]?.length || 0} Tickets
-                                        </div>
-                                    </div>
-
-                                    <Droppable droppableId={tech.id}>
-                                        {(provided, snapshot) => (
-                                            <div
-                                                ref={provided.innerRef}
-                                                {...provided.droppableProps}
-                                                className={clsx(
-                                                    "flex-1 rounded-2xl p-2 transition-all flex flex-col gap-3 min-h-[100px] overflow-y-auto custom-scrollbar",
-                                                    snapshot.isDraggingOver ? "bg-primary/[0.03] border-2 border-dashed border-primary/30" : "bg-muted/10 border-2 border-transparent"
-                                                )}
-                                            >
-                                                {assignedRoutes[tech.id]?.map((ticket, index) => (
-                                                    <Draggable key={ticket.id} draggableId={ticket.id} index={index}>
-                                                        {(provided, snapshot) => (
-                                                            <div
-                                                                ref={provided.innerRef}
-                                                                {...provided.draggableProps}
-                                                                {...provided.dragHandleProps}
-                                                                className={clsx(
-                                                                    "p-3 bg-card border border-border shadow-sm rounded-xl flex items-center justify-between group cursor-pointer transition-all hover:border-primary/30",
-                                                                    snapshot.isDragging && "opacity-50"
-                                                                )}
-                                                                onClick={() => setSelectedTicket(ticket)}
-                                                            >
-                                                                <div className="flex items-center gap-3 min-w-0">
-                                                                    <div className="text-[10px] font-black text-muted-foreground w-4">{index + 1}</div>
-                                                                    <div className="min-w-0">
-                                                                        <p className="text-[10px] font-black uppercase truncate">{ticket.nombre_cliente}</p>
-                                                                        <div className="flex items-center gap-1.5 mt-0.5">
-                                                                            <MapPin size={8} className="text-primary" />
-                                                                            <span className="text-[8px] font-bold text-muted-foreground uppercase truncate">{ticket.barrio}</span>
-                                                                        </div>
-                                                                    </div>
-                                                                </div>
-                                                                <div className={clsx(
-                                                                    "px-1.5 py-0.5 rounded text-[8px] font-black",
-                                                                    ticket.score > 150 ? "text-red-500" : "text-muted-foreground"
-                                                                )}>
-                                                                    {ticket.score}
-                                                                </div>
-                                                            </div>
-                                                        )}
-                                                    </Draggable>
-                                                ))}
-                                                {provided.placeholder}
-                                                {assignedRoutes[tech.id]?.length === 0 && (
-                                                    <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground/30 border-2 border-dashed border-border rounded-xl">
-                                                        <PlusIcon size={24} />
-                                                        <p className="text-[9px] font-black uppercase mt-2">Arrastra un ticket aquí</p>
-                                                    </div>
-                                                )}
-                                            </div>
-                                        )}
-                                    </Droppable>
-                                </div>
-                            ))}
-                        </div>
                     </div>
-                </div>
-            </DragDropContext>
 
-            {/* Ticket Detail Side Panel - Slide-over UI */}
-            {selectedTicket && (
-                <div className="fixed inset-0 z-50 overflow-hidden">
-                    <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" onClick={() => setSelectedTicket(null)} />
-
-                    <div className="absolute inset-y-0 right-0 max-w-full flex">
-                        <div className="w-screen max-w-md transform transition-all duration-500 ease-in-out">
-                            <div className="h-full flex flex-col bg-white shadow-2xl overflow-y-auto rounded-l-[2.5rem] border-l-4 border-primary">
-                                {/* Header */}
-                                <div className="p-8 bg-slate-50 border-b border-slate-100 flex items-start justify-between relative overflow-hidden">
-                                    <div className="absolute top-0 right-0 p-12 -mt-6 -mr-6 bg-primary/5 rounded-full blur-2xl" />
-
-                                    <div className="relative z-10 w-full">
-                                        <div className="flex items-center flex-wrap gap-2 mb-6">
-                                            <span className={clsx(
-                                                "px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest flex items-center gap-2",
-                                                selectedTicket.score > 150 ? "bg-red-500 text-white shadow-lg shadow-red-500/20" : "bg-primary/10 text-primary border border-primary/20"
-                                            )}>
-                                                {selectedTicket.id_prioridad === 5 && <AlertCircle size={10} />}
-                                                Ticket: #{selectedTicket.id}
-                                            </span>
-                                            <span className={clsx(
-                                                "px-2 py-1 rounded-lg text-[10px] font-black uppercase",
-                                                selectedTicket.id_prioridad >= 4 ? "bg-red-100 text-red-700" :
-                                                    selectedTicket.id_prioridad === 3 ? "bg-orange-100 text-orange-700" : "bg-blue-100 text-blue-700"
-                                            )}>
-                                                Prioridad: {selectedTicket.prioridad}
-                                            </span>
-                                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-auto">{new Date(selectedTicket.fecha_creacion).toLocaleDateString()}</span>
+                    {/* CAPA 1.2: CONTENIDO DE DESPACHO (LATERALES) */}
+                    {activeView === 'dispatch' && (
+                        <div className="grid grid-cols-[280px_1fr_300px] gap-4 w-full h-full">
+                            {/* Columna Izquierda: Control & Pool */}
+                            <div className="flex flex-col gap-4 h-full overflow-hidden">
+                                {/* Widget: Filtros Operativos */}
+                                <div className="bg-white/70 backdrop-blur-3xl p-6 rounded-[2rem] border border-white/50 shadow-[0_20px_40px_rgba(0,0,0,0.05)] pointer-events-auto animate-in slide-in-from-left-8 duration-500">
+                                    <div className="flex items-center justify-between mb-6">
+                                        <div className="flex items-center gap-2">
+                                            <div className="w-2 h-6 bg-primary rounded-full" />
+                                            <h2 className="text-sm font-black uppercase tracking-tight text-slate-900">Filtros</h2>
                                         </div>
-
-                                        <div className="flex flex-col gap-1">
-                                            <p className="text-xs font-bold text-primary uppercase tracking-widest border-l-4 border-primary pl-3">{selectedTicket.asunto}</p>
+                                        <div className="px-2 py-1 bg-slate-100 rounded-lg">
+                                            <span className="text-[10px] font-black text-slate-500">{filteredTickets.length} / {tickets.length}</span>
                                         </div>
                                     </div>
 
-                                    <button
-                                        onClick={() => setSelectedTicket(null)}
-                                        className="p-2 bg-white rounded-full shadow-lg border border-slate-100 hover:scale-110 active:scale-95 transition-all text-slate-400 hover:text-red-500"
-                                    >
-                                        <X size={20} />
-                                    </button>
+                                    <div className="flex flex-col gap-5">
+                                        <div className="space-y-1.5">
+                                            <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
+                                                <User size={10} /> Técnico Asignado
+                                            </label>
+                                            <div className="relative">
+                                                <select
+                                                    value={filterTechId}
+                                                    onChange={(e) => setFilterTechId(e.target.value)}
+                                                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-xs font-bold text-slate-700 outline-none focus:ring-1 focus:ring-primary/20 transition-all appearance-none pr-10"
+                                                >
+                                                    <option value="all">Todos los Técnicos</option>
+                                                    {technicians.map(t => (
+                                                        <option key={t.id} value={t.id}>{t.full_name}</option>
+                                                    ))}
+                                                </select>
+                                                <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" size={14} />
+                                            </div>
+                                        </div>
+
+                                        <div className="flex items-center justify-between p-3 bg-slate-50 rounded-2xl border border-slate-200/50">
+                                            <label className="flex items-center gap-3 cursor-pointer group">
+                                                <div className="relative">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={showInstallations}
+                                                        onChange={(e) => setShowInstallations(e.target.checked)}
+                                                        className="sr-only peer"
+                                                    />
+                                                    <div className="w-10 h-5 bg-slate-200 rounded-full peer peer-checked:bg-primary transition-all duration-300"></div>
+                                                    <div className="absolute left-1 top-1 w-3 h-3 bg-white rounded-full peer-checked:translate-x-5 transition-all duration-300 shadow-sm"></div>
+                                                </div>
+                                                <span className="text-[10px] font-black uppercase text-slate-600 group-hover:text-primary transition-colors">Ver Instalaciones</span>
+                                            </label>
+                                        </div>
+                                    </div>
                                 </div>
 
-                                {/* Content */}
-                                <div className="p-8 space-y-8 flex-1">
-                                    {/* Action Shortcuts */}
-                                    <div className="grid grid-cols-2 gap-3">
-                                        {selectedTicket.celular && (
-                                            <a
-                                                href={`tel:${selectedTicket.celular}`}
-                                                className="flex flex-col items-center justify-center p-4 bg-emerald-50 rounded-3xl border border-emerald-100 text-emerald-700 hover:bg-emerald-100 transition-all group"
-                                            >
-                                                <Phone size={20} className="mb-2 group-hover:scale-110 transition-transform" />
-                                                <span className="text-[10px] font-black uppercase">Llamar Cliente</span>
-                                            </a>
-                                        )}
-                                        <a
-                                            href={`https://wisphub.io/tickets/ver/${selectedTicket.id}/`}
-                                            target="_blank"
-                                            rel="noopener noreferrer"
-                                            className="flex flex-col items-center justify-center p-4 bg-blue-50 rounded-3xl border border-blue-100 text-blue-700 hover:bg-blue-100 transition-all group"
-                                        >
-                                            <ExternalLink size={20} className="mb-2 group-hover:scale-110 transition-transform" />
-                                            <span className="text-[10px] font-black uppercase">Ver en WispHub</span>
-                                        </a>
-                                    </div>
-
-                                    <div className="space-y-6">
-                                        <div className="flex flex-col gap-1">
-                                            <h2 className="text-2xl font-black text-slate-900 leading-tight uppercase break-words">
-                                                {selectedTicket.nombre_cliente || 'Sin Nombre de Cliente'}
-                                            </h2>
-                                            {selectedTicket.cedula && (
-                                                <p className="text-[11px] font-bold text-slate-400 uppercase">C.C. {selectedTicket.cedula}</p>
-                                            )}
-                                        </div>
-
-                                        <div className="flex items-center gap-2 group">
-                                            <div className="w-8 h-8 rounded-xl bg-orange-100 flex items-center justify-center text-orange-600 transition-transform group-hover:rotate-12">
-                                                <MapPin size={16} />
-                                            </div>
-                                            <div className="flex-1">
-                                                <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">Dirección de Servicio</span>
-                                                <p className="text-xs font-bold text-slate-700">{selectedTicket.direccion}</p>
-                                                <p className="text-[10px] font-black text-primary uppercase mt-1">Barrio: {selectedTicket.barrio}</p>
-                                            </div>
-                                        </div>
-
-                                        <div className="grid grid-cols-2 gap-4">
-                                            <div className="flex items-center gap-2 group">
-                                                <div className="w-8 h-8 rounded-xl bg-blue-100 flex items-center justify-center text-blue-600 transition-transform group-hover:rotate-12">
-                                                    <User size={16} />
-                                                </div>
-                                                <div>
-                                                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">ID / Usuario</span>
-                                                    <p className="text-xs font-bold text-slate-700 truncate max-w-[120px]">
-                                                        {detailLoading ? '...' : (selectedTicket.id_servicio || 'N/A') + ' / ' + (selectedTicket.usuario_wisphub || 'N/A')}
-                                                    </p>
-                                                </div>
-                                            </div>
-                                            <div className="flex items-center gap-2 group">
-                                                <div className="w-8 h-8 rounded-xl bg-emerald-100 flex items-center justify-center text-emerald-600 transition-transform group-hover:rotate-12">
-                                                    <AlertCircle size={16} />
-                                                </div>
-                                                <div>
-                                                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">Estado Serv.</span>
-                                                    {detailLoading ? (
-                                                        <span className="animate-pulse bg-slate-100 h-4 w-12 block rounded mt-1" />
-                                                    ) : (
-                                                        <span className={clsx(
-                                                            "text-[10px] font-black uppercase px-2 py-0.5 rounded",
-                                                            selectedTicket.estado_servicio?.toLowerCase() === 'activo' ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"
-                                                        )}>
-                                                            {selectedTicket.estado_servicio}
-                                                        </span>
-                                                    )}
-                                                </div>
-                                            </div>
-                                        </div>
-
-                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
-                                            <div className="bg-slate-50 p-3 rounded-2xl border border-slate-100">
-                                                <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest block mb-1">Creado Por</span>
-                                                <div className="flex items-center gap-2">
-                                                    <div className="w-5 h-5 rounded-full bg-slate-200 flex items-center justify-center text-[10px] font-black text-slate-500 uppercase">
-                                                        {detailLoading ? '...' : selectedTicket.creado_por?.substring(0, 1)}
-                                                    </div>
-                                                    <span className="text-[10px] font-bold text-slate-600">
-                                                        {detailLoading ? 'Cargando...' : selectedTicket.creado_por}
-                                                    </span>
-                                                </div>
-                                            </div>
-                                            <div className="bg-slate-50 p-3 rounded-2xl border border-slate-100">
-                                                <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest block mb-1">Técnico Actual</span>
-                                                <div className="flex items-center gap-2">
-                                                    <div className="w-5 h-5 rounded-full bg-blue-100 flex items-center justify-center text-[10px] font-black text-blue-500 uppercase">
-                                                        {detailLoading ? '...' : (selectedTicket.tecnico_actual || 'S')?.substring(0, 1)}
-                                                    </div>
-                                                    <span className="text-[10px] font-bold text-slate-600 truncate">
-                                                        {detailLoading ? 'Cargando...' : selectedTicket.tecnico_actual}
-                                                    </span>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
-
-                                    <div className="w-full h-px bg-slate-100" />
-
-                                    {/* Description */}
-                                    <div className="space-y-3">
+                                {/* Widget: Pool de Tickets Pendientes */}
+                                <div className="flex-1 flex flex-col min-h-0 bg-white/70 backdrop-blur-3xl rounded-[2.5rem] border border-white/50 shadow-[0_25px_50px_rgba(0,0,0,0.05)] overflow-hidden pointer-events-auto animate-in slide-in-from-left-8 duration-700 delay-150">
+                                    <div className="p-6 border-b border-slate-100 flex items-center justify-between">
                                         <div className="flex items-center gap-2">
-                                            <FileText size={16} className="text-slate-400" />
-                                            <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Descripción del Reporte</span>
+                                            <div className="p-2 bg-primary/10 rounded-xl">
+                                                <Truck size={14} className="text-primary" />
+                                            </div>
+                                            <h2 className="text-xs font-black uppercase tracking-tight text-slate-800">Pool Pendientes</h2>
                                         </div>
-                                        <div className="bg-slate-50 p-6 rounded-[2rem] border border-slate-100 max-h-[400px] overflow-y-auto custom-scrollbar">
-                                            <div
-                                                className="text-sm font-medium text-slate-600 leading-relaxed html-content"
-                                                dangerouslySetInnerHTML={{ __html: selectedTicket.descripcion || 'Sin descripción detallada.' }}
+                                    </div>
+
+                                    <div className="px-5 py-4">
+                                        <div className="relative">
+                                            <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                                            <input
+                                                type="text"
+                                                placeholder="Buscar..."
+                                                value={searchQuery}
+                                                onChange={(e) => setSearchQuery(e.target.value)}
+                                                className="w-full bg-slate-50 border border-slate-200 rounded-[1.25rem] pl-12 pr-4 py-3 text-xs font-bold text-slate-700 outline-none focus:bg-white focus:ring-1 focus:ring-primary/20 transition-all border-dashed"
                                             />
                                         </div>
                                     </div>
 
-                                    {/* Metadata / Tags */}
-                                    <div className="flex flex-wrap gap-2 pt-4">
-                                        <div className="px-3 py-1.5 bg-slate-100 rounded-xl text-[9px] font-black text-slate-500 uppercase">
-                                            SLA: {selectedTicket.horas_abierto} Horas
-                                        </div>
-                                        <div className="px-3 py-1.5 bg-slate-100 rounded-xl text-[9px] font-black text-slate-500 uppercase">
-                                            Smart Score: {selectedTicket.score} pts
-                                        </div>
-                                        {selectedTicket.recurrence > 1 && (
-                                            <div className="px-3 py-1.5 bg-red-100 rounded-xl text-[9px] font-black text-red-600 uppercase flex items-center gap-1">
-                                                <AlertCircle size={10} /> {selectedTicket.recurrence}ª RECURRENCIA
-                                            </div>
+                                    <div className="flex-1 overflow-y-auto custom-scrollbar px-5 pb-6">
+                                        <Droppable droppableId="unassigned">
+                                            {(provided, snapshot) => (
+                                                <div
+                                                    {...provided.droppableProps}
+                                                    ref={provided.innerRef}
+                                                    className={clsx(
+                                                        "min-h-[200px] transition-all duration-300 rounded-2xl",
+                                                        snapshot.isDraggingOver ? "bg-primary/5 ring-2 ring-primary/20 ring-dashed" : "bg-transparent"
+                                                    )}
+                                                >
+                                                    {filteredTickets.map((ticket, index) => (
+                                                        <Draggable key={ticket.id} draggableId={ticket.id} index={index}>
+                                                            {(provided, snapshot) => {
+                                                                const content = (
+                                                                    <div
+                                                                        ref={provided.innerRef}
+                                                                        {...provided.draggableProps}
+                                                                        {...provided.dragHandleProps}
+                                                                        className={clsx(
+                                                                            "group p-3 mb-2 rounded-xl transition-all border shadow-sm",
+                                                                            snapshot.isDragging
+                                                                                ? "bg-white shadow-[0_15px_30px_rgba(var(--primary-rgb),0.15)] border-primary ring-2 ring-primary/10 rotate-2 z-[9999] opacity-100 scale-105"
+                                                                                : "bg-white border-slate-100 hover:border-primary/20 hover:shadow-md hover:-translate-y-0.5"
+                                                                        )}
+                                                                        onClick={() => setSelectedTicket(ticket)}
+                                                                    >
+                                                                        <div className="flex items-center justify-between mb-2">
+                                                                            <div className="flex items-center gap-2">
+                                                                                <div className="px-2 py-0.5 bg-slate-100 rounded text-[9px] font-bold text-slate-500 uppercase">#{ticket.id}</div>
+                                                                                {ticket.id_prioridad >= 4 && (
+                                                                                    <div className="bg-red-50 text-red-500 text-[8px] font-black px-1.5 py-0.5 rounded border border-red-100 uppercase">Muy Urgente</div>
+                                                                                )}
+                                                                            </div>
+                                                                        </div>
+                                                                        <h3 className="text-xs font-black text-slate-900 group-hover:text-primary transition-colors leading-tight mb-1">{ticket.nombre_cliente}</h3>
+                                                                        <div className="flex items-center gap-1.5 text-slate-400">
+                                                                            <MapPin size={10} className="text-primary/60" />
+                                                                            <span className="text-[10px] font-bold uppercase tracking-tight truncate">{ticket.barrio}</span>
+                                                                        </div>
+                                                                        <div className="mt-2 pt-2 border-t border-slate-50">
+                                                                            <span className="block text-[9px] font-black text-slate-400 uppercase tracking-widest truncate">{ticket.asunto}</span>
+                                                                        </div>
+                                                                    </div>
+                                                                );
+
+                                                                if (snapshot.isDragging) {
+                                                                    return <Portal>{content}</Portal>;
+                                                                }
+                                                                return content;
+                                                            }}
+                                                        </Draggable>
+                                                    ))}
+                                                    {provided.placeholder}
+                                                </div>
+                                            )}
+                                        </Droppable>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="relative min-w-0 h-full">
+                                {/* WIDGET: BADGE DE FILTRO MAPA (BOTTOM CENTER) */}
+                                {mapFilter && (
+                                    <div className="absolute bottom-6 left-1/2 -translate-x-1/2 bg-primary text-white px-8 py-4 rounded-full shadow-2xl flex items-center gap-4 pointer-events-auto animate-in slide-in-from-bottom-8 duration-500">
+                                        <MapPin size={16} className="animate-bounce" />
+                                        <span className="text-xs font-black uppercase tracking-widest">Barrio: {mapFilter}</span>
+                                        <button
+                                            onClick={() => setMapFilter(null)}
+                                            className="bg-white/20 hover:bg-white/40 p-1.5 rounded-full transition-colors"
+                                        >
+                                            <X size={16} />
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* COLUMNA DERECHA: ASIGNACIÓN & TÉCNICOS */}
+                            <div className="flex flex-col gap-4 h-full overflow-hidden">
+
+                                {/* HEADER DE ASIGNACIÓN COMPACTO */}
+                                <div className="bg-slate-900 px-6 py-4 rounded-[2rem] border border-white/10 shadow-2xl flex items-center justify-between pointer-events-auto">
+                                    <div className="flex flex-col">
+                                        <h2 className="text-sm font-black text-white uppercase tracking-tighter leading-none">Asignación</h2>
+                                        <span className="text-[8px] font-bold text-white/40 uppercase tracking-widest mt-1">Hoy</span>
+                                    </div>
+                                    <button
+                                        onClick={handlePublish}
+                                        disabled={loading || Object.keys(assignedRoutes).length === 0}
+                                        className={clsx(
+                                            "px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-2",
+                                            loading || Object.keys(assignedRoutes).length === 0
+                                                ? "bg-slate-800 text-slate-500 cursor-not-allowed border border-white/5"
+                                                : "bg-primary text-white shadow-lg shadow-primary/20 hover:scale-105 active:scale-95 border border-primary/20"
                                         )}
+                                    >
+                                        {loading ? <Loader2 className="animate-spin" size={12} /> : (
+                                            <>
+                                                <CloudUpload size={12} />
+                                                <span>Publicar</span>
+                                            </>
+                                        )}
+                                    </button>
+                                </div>
+
+                                {/* LISTA DE TÉCNICOS */}
+                                <div className="flex-1 bg-white/70 backdrop-blur-3xl p-5 rounded-[2.5rem] border border-white/50 shadow-[0_25px_50px_rgba(0,0,0,0.05)] overflow-hidden pointer-events-auto animate-in slide-in-from-right-8 duration-700 delay-200">
+                                    <div className="flex flex-col gap-5 h-full">
+                                        <div className="custom-scrollbar pr-2 flex-1">
+                                            {technicians.map((tech) => (
+                                                <div key={tech.id} className="mb-6">
+                                                    <div className="flex items-center gap-2 px-2 py-1.5 hover:bg-slate-50/80 transition-colors group cursor-default">
+                                                        <div className="w-7 h-7 rounded-full bg-gradient-to-br from-primary/10 to-primary/5 flex items-center justify-center border border-primary/10">
+                                                            <User size={12} className="text-primary" />
+                                                        </div>
+                                                        <div className="flex-1 min-w-0">
+                                                            <h3 className="text-[11px] font-bold text-slate-800 tracking-tight truncate border-b border-transparent group-hover:border-primary/20 transition-all">{tech.full_name}</h3>
+                                                        </div>
+                                                        <div className="flex items-center gap-1.5 bg-slate-100 px-1.5 py-0.5 rounded-lg border border-slate-200/50">
+                                                            <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
+                                                            <span className="text-[9px] font-black text-slate-600">{(assignedRoutes[tech.id] || []).length}</span>
+                                                        </div>
+                                                    </div>
+
+                                                    <Droppable droppableId={tech.id}>
+                                                        {(provided, snapshot) => (
+                                                            <div
+                                                                {...provided.droppableProps}
+                                                                ref={provided.innerRef}
+                                                                className={clsx(
+                                                                    "mt-1.5 min-h-[40px] transition-all duration-300 rounded-xl flex flex-col gap-1.5",
+                                                                    snapshot.isDraggingOver ? "bg-primary/5 border border-primary/20 shadow-inner p-2" : "bg-transparent px-1 pb-2"
+                                                                )}
+                                                            >
+                                                                {(assignedRoutes[tech.id] || []).map((ticket, index) => (
+                                                                    <Draggable key={ticket.id} draggableId={ticket.id} index={index}>
+                                                                        {(provided, snapshot) => {
+                                                                            const content = (
+                                                                                <div
+                                                                                    ref={provided.innerRef}
+                                                                                    {...provided.draggableProps}
+                                                                                    {...provided.dragHandleProps}
+                                                                                    className={clsx(
+                                                                                        "group relative p-2 rounded-lg transition-all cursor-grab active:cursor-grabbing border",
+                                                                                        snapshot.isDragging
+                                                                                            ? "bg-white shadow-xl border-primary ring-2 ring-primary/20 scale-105 rotate-1 z-[9999] opacity-100"
+                                                                                            : "bg-white border-slate-100 hover:border-primary/20 shadow-sm"
+                                                                                    )}
+                                                                                >
+                                                                                    <div className="flex items-center gap-2">
+                                                                                        <div className="bg-slate-50 text-slate-400 text-[8px] font-black w-5 h-5 rounded flex items-center justify-center border border-slate-100">
+                                                                                            {index + 1}
+                                                                                        </div>
+                                                                                        <div className="min-w-0 flex-1">
+                                                                                            <h4 className="text-[10px] font-bold text-slate-700 tracking-tight group-hover:text-primary transition-colors truncate leading-tight">{ticket.nombre_cliente}</h4>
+                                                                                            <div className="flex items-center gap-1">
+                                                                                                <span className="text-[8px] font-black text-primary uppercase">#{ticket.id}</span>
+                                                                                                <span className="text-[8px] font-medium text-slate-300">•</span>
+                                                                                                <span className="text-[8px] font-bold text-slate-400 uppercase truncate">{ticket.barrio}</span>
+                                                                                            </div>
+                                                                                        </div>
+                                                                                    </div>
+                                                                                </div>
+                                                                            );
+
+                                                                            if (snapshot.isDragging) {
+                                                                                return <Portal>{content}</Portal>;
+                                                                            }
+                                                                            return content;
+                                                                        }}
+                                                                    </Draggable>
+                                                                ))}
+                                                                {provided.placeholder}
+                                                                {(assignedRoutes[tech.id] || []).length === 0 && !snapshot.isDraggingOver && (
+                                                                    <div className="py-4 text-center border-2 border-dashed border-slate-100 rounded-xl group-hover:border-primary/20 transition-colors">
+                                                                        <div className="flex flex-col items-center gap-1">
+                                                                            <CloudDownload size={10} className="text-slate-200" />
+                                                                            <span className="text-[8px] font-bold text-slate-300 uppercase tracking-widest">Soltar</span>
+                                                                        </div>
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        )}
+                                                    </Droppable>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            </DragDropContext>
+
+            {/* PANEL DE DETALLE (OVERLAY ABSOLUTO) */}
+            {selectedTicket && (
+                <div className="fixed inset-0 z-[2000] flex items-center justify-end p-6 pointer-events-none">
+                    <div
+                        className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm pointer-events-auto"
+                        onClick={() => setSelectedTicket(null)}
+                    />
+                    <div className="relative w-full max-w-xl h-full bg-white rounded-[3rem] shadow-2xl overflow-hidden flex flex-col animate-in slide-in-from-right-12 duration-500 pointer-events-auto">
+                        {/* Header del Detalle */}
+                        <div className="p-8 pb-4 flex justify-between items-start">
+                            <div className="space-y-1">
+                                <div className="flex items-center gap-2 mb-2">
+                                    <div className={clsx(
+                                        "px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest text-white",
+                                        selectedTicket.id_prioridad >= 4 ? "bg-red-500" :
+                                            selectedTicket.id_prioridad === 3 ? "bg-orange-500" : "bg-primary"
+                                    )}>
+                                        Ticket #{selectedTicket.id}
+                                    </div>
+                                    {selectedTicket.recurrence > 1 && (
+                                        <div className="px-3 py-1 bg-red-100 text-red-600 rounded-full text-[10px] font-black uppercase tracking-widest flex items-center gap-1">
+                                            <AlertCircle size={10} /> Recurrente
+                                        </div>
+                                    )}
+                                </div>
+                                <h2 className="text-2xl font-black uppercase tracking-tighter text-slate-800 leading-none">
+                                    {selectedTicket.nombre_cliente}
+                                </h2>
+                                <div className="flex flex-col gap-1 mt-1">
+                                    {selectedTicket.cedula && (
+                                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">C.C. {selectedTicket.cedula}</p>
+                                    )}
+                                    <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">{selectedTicket.asunto}</p>
+                                </div>
+                            </div>
+                            <button
+                                onClick={() => setSelectedTicket(null)}
+                                className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-400"
+                            >
+                                <X size={24} />
+                            </button>
+                        </div>
+
+                        <div className="flex-1 overflow-y-auto custom-scrollbar p-8 pt-4">
+                            <div className="space-y-8">
+                                {/* Información Principal */}
+                                <div className="grid grid-cols-2 gap-6">
+                                    <div className="bg-slate-50 p-6 rounded-[2rem] border border-slate-100">
+                                        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3 flex items-center gap-2">
+                                            <MapPin size={12} className="text-primary" /> Sector / Barrio
+                                        </p>
+                                        <p className="text-sm font-black text-slate-700 uppercase leading-none">{selectedTicket.barrio || 'No especificado'}</p>
+                                        <p className="text-[10px] font-bold text-slate-400 mt-2 truncate">{selectedTicket.direccion}</p>
+                                    </div>
+                                    <div className="bg-slate-50 p-6 rounded-[2rem] border border-slate-100">
+                                        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3 flex items-center gap-2">
+                                            <Phone size={12} className="text-emerald-500" /> Contacto Directo
+                                        </p>
+                                        <p className="text-sm font-black text-slate-700 leading-none">{selectedTicket.celular || selectedTicket.telefono || 'Sin teléfono'}</p>
+                                        <div className="flex gap-2 mt-2">
+                                            <a
+                                                href={`tel:${selectedTicket.celular}`}
+                                                className="text-[10px] font-black text-primary uppercase hover:underline"
+                                            >
+                                                Llamar ahora
+                                            </a>
+                                        </div>
                                     </div>
                                 </div>
 
-                                {/* Footer */}
-                                <div className="p-8 bg-slate-50 border-t border-slate-100 flex gap-4">
-                                    <button
-                                        onClick={() => setSelectedTicket(null)}
-                                        className="flex-1 py-4 bg-slate-200 text-slate-600 rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-slate-300 transition-all"
-                                    >
-                                        Cerrar Panel
-                                    </button>
+                                <div className="space-y-6">
+
+                                    <div className="flex items-center gap-2 group">
+                                        <div className="w-8 h-8 rounded-xl bg-orange-100 flex items-center justify-center text-orange-600 transition-transform group-hover:rotate-12">
+                                            <MapPin size={16} />
+                                        </div>
+                                        <div className="flex-1">
+                                            <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">Dirección de Servicio</span>
+                                            <p className="text-xs font-bold text-slate-700">{selectedTicket.direccion}</p>
+                                            <p className="text-[10px] font-black text-primary uppercase mt-1">Barrio: {selectedTicket.barrio}</p>
+                                        </div>
+                                    </div>
+
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div className="flex items-center gap-2 group">
+                                            <div className="w-8 h-8 rounded-xl bg-blue-100 flex items-center justify-center text-blue-600 transition-transform group-hover:rotate-12">
+                                                <User size={16} />
+                                            </div>
+                                            <div>
+                                                <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">ID / Usuario</span>
+                                                <p className="text-xs font-bold text-slate-700 truncate max-w-[120px]">
+                                                    {detailLoading ? '...' : (selectedTicket.id_servicio || 'N/A') + ' / ' + (selectedTicket.usuario_wisphub || 'N/A')}
+                                                </p>
+                                            </div>
+                                        </div>
+                                        <div className="flex items-center gap-2 group">
+                                            <div className="w-8 h-8 rounded-xl bg-emerald-100 flex items-center justify-center text-emerald-600 transition-transform group-hover:rotate-12">
+                                                <AlertCircle size={16} />
+                                            </div>
+                                            <div>
+                                                <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">Estado Serv.</span>
+                                                {detailLoading ? (
+                                                    <span className="animate-pulse bg-slate-100 h-4 w-12 block rounded mt-1" />
+                                                ) : (
+                                                    <span className={clsx(
+                                                        "text-[10px] font-black uppercase px-2 py-0.5 rounded",
+                                                        selectedTicket.estado_servicio?.toLowerCase() === 'activo' ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"
+                                                    )}>
+                                                        {selectedTicket.estado_servicio}
+                                                    </span>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+                                        <div className="bg-slate-50 p-3 rounded-2xl border border-slate-100">
+                                            <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest block mb-1">Creado Por</span>
+                                            <div className="flex items-center gap-2">
+                                                <div className="w-5 h-5 rounded-full bg-slate-200 flex items-center justify-center text-[10px] font-black text-slate-500 uppercase">
+                                                    {detailLoading ? '...' : selectedTicket.creado_por?.substring(0, 1)}
+                                                </div>
+                                                <span className="text-[10px] font-bold text-slate-600">
+                                                    {detailLoading ? 'Cargando...' : selectedTicket.creado_por}
+                                                </span>
+                                            </div>
+                                        </div>
+                                        <div className="bg-slate-50 p-3 rounded-2xl border border-slate-100">
+                                            <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest block mb-1">Técnico Actual</span>
+                                            <div className="flex items-center gap-2">
+                                                <div className="w-5 h-5 rounded-full bg-blue-100 flex items-center justify-center text-[10px] font-black text-blue-500 uppercase">
+                                                    {detailLoading ? '...' : (selectedTicket.tecnico_actual || 'S')?.substring(0, 1)}
+                                                </div>
+                                                <span className="text-[10px] font-bold text-slate-600 truncate">
+                                                    {detailLoading ? 'Cargando...' : selectedTicket.tecnico_actual}
+                                                </span>
+                                            </div>
+                                        </div>
+                                    </div>
                                 </div>
+
+                                <div className="w-full h-px bg-slate-100" />
+
+                                {/* Description */}
+                                <div className="space-y-3">
+                                    <div className="flex items-center gap-2">
+                                        <FileText size={16} className="text-slate-400" />
+                                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Descripción del Reporte</span>
+                                    </div>
+                                    <div className="bg-slate-50 p-6 rounded-[2rem] border border-slate-100 max-h-[400px] overflow-y-auto custom-scrollbar">
+                                        <div
+                                            className="text-sm font-medium text-slate-600 leading-relaxed html-content"
+                                            dangerouslySetInnerHTML={{ __html: selectedTicket.descripcion || 'Sin descripción detallada.' }}
+                                        />
+                                    </div>
+                                </div>
+
+                                {/* Metadata / Tags */}
+                                <div className="flex flex-wrap gap-2 pt-4">
+                                    <div className="px-3 py-1.5 bg-slate-100 rounded-xl text-[9px] font-black text-slate-500 uppercase">
+                                        SLA: {selectedTicket.horas_abierto} Horas
+                                    </div>
+                                    <div className="px-3 py-1.5 bg-slate-100 rounded-xl text-[9px] font-black text-slate-500 uppercase">
+                                        Smart Score: {selectedTicket.score} pts
+                                    </div>
+                                    {selectedTicket.recurrence > 1 && (
+                                        <div className="px-3 py-1.5 bg-red-100 rounded-xl text-[9px] font-black text-red-600 uppercase flex items-center gap-1">
+                                            <AlertCircle size={10} /> {selectedTicket.recurrence}ª RECURRENCIA
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+
+                            {/* Footer */}
+                            <div className="p-8 bg-white border-t border-slate-100 flex gap-4 mt-8 sticky bottom-0">
+                                <button
+                                    onClick={() => setSelectedTicket(null)}
+                                    className="flex-1 py-4 bg-slate-900 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-slate-800 transition-all shadow-lg shadow-slate-200"
+                                >
+                                    Cerrar Detalles
+                                </button>
+                                <button
+                                    onClick={() => window.open(`https://wisphub.net/tickets/${selectedTicket.id}/`, '_blank')}
+                                    className="p-4 bg-slate-100 text-slate-600 rounded-2xl hover:bg-slate-200 transition-all"
+                                >
+                                    <ExternalLink size={18} />
+                                </button>
                             </div>
                         </div>
                     </div>
@@ -858,11 +1013,3 @@ export function OperationsDispatch() {
     );
 }
 
-function PlusIcon({ size }: { size: number }) {
-    return (
-        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-            <line x1="12" y1="5" x2="12" y2="19" />
-            <line x1="5" y1="12" x2="19" y2="12" />
-        </svg>
-    );
-}

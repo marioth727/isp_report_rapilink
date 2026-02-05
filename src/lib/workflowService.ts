@@ -5,7 +5,7 @@ import type { WorkflowProcess, WorkflowLog, ParticipantType, PlatformUser } from
 /**
  * Normaliza un texto para comparaciones (minúsculas, sin espacios extras)
  */
-const normalize = (text: string | null | undefined): string => {
+export const normalize = (text: string | null | undefined): string => {
     if (!text) return '';
     return text.toString().toLowerCase().trim()
         .normalize("NFD").replace(/[\u0300-\u036f]/g, ""); // Quitar acentos opcionalmente

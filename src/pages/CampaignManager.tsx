@@ -29,12 +29,21 @@ export function CampaignManager() {
     const fetcher = async ([p, l, fPlan, fStatus, q]: [number, number, string, string, string]) => {
         if (q) {
             const results = await WisphubService.searchClients(q);
-            return { results, count: results.length };
+            // Asegurar que estado sea consistente si viene como número
+            const normalizedResults = results.map(c => ({
+                ...c,
+                estado: String(c.estado)
+            }));
+            return { results: normalizedResults, count: normalizedResults.length };
         }
-        return await WisphubService.getAllClients(p, l, {
+        const data = await WisphubService.getAllClients(p, l, {
             plan: fPlan,
             status: fStatus
         });
+        return {
+            ...data,
+            results: data.results.map(c => ({ ...c, estado: String(c.estado) }))
+        };
     };
 
     const { data, isValidating } = useSWR(
@@ -64,8 +73,9 @@ export function CampaignManager() {
 
             const map = new Map<number, CRMInteraction>();
             data?.forEach((interaction: any) => {
-                if (interaction.client_id && !map.has(interaction.client_id)) {
-                    map.set(interaction.client_id, interaction);
+                const numericId = Number(interaction.client_id);
+                if (numericId && !map.has(numericId)) {
+                    map.set(numericId, interaction);
                 }
             });
             return map;
@@ -195,7 +205,8 @@ export function CampaignManager() {
                         <option value="">Todos</option>
                         <option value="1">Activo</option>
                         <option value="2">Suspendido</option>
-                        <option value="3">Retirado</option>
+                        <option value="3">Cancelado</option>
+                        <option value="4">Gratis</option>
                     </select>
                 </div>
 
@@ -212,8 +223,11 @@ export function CampaignManager() {
                         <option value="all">Todos</option>
                         <option value="pending">Sin Gestión (Hoy)</option>
                         <option value="tracking">En Seguimiento</option>
-                        <option value="managed">Gestionados</option>
-                        <option value="sale">Ventas (Verde)</option>
+                        <option value="managed">Gestionados (Todos)</option>
+                        <option value="technical">Falla Técnica (Azul)</option>
+                        <option value="rejected">Rechazados (Rojo)</option>
+                        <option value="no-answer">No Contesta (Gris)</option>
+                        <option value="sale">Venta (Verde)</option>
                     </select>
                 </div>
             </div>
@@ -248,10 +262,15 @@ export function CampaignManager() {
                                     .filter(client => {
                                         if (filterManagement === 'all') return true;
                                         const interaction = activeInteractions.get(client.id_servicio);
+                                        const result = interaction?.result || '';
+
                                         if (filterManagement === 'pending') return !interaction;
-                                        if (filterManagement === 'tracking') return interaction?.result === 'Lo pensará';
+                                        if (filterManagement === 'tracking') return result === 'Lo pensará';
                                         if (filterManagement === 'managed') return !!interaction;
-                                        if (filterManagement === 'sale') return interaction?.result === 'Aceptó Migración';
+                                        if (filterManagement === 'technical') return result === 'Falla Técnica';
+                                        if (filterManagement === 'rejected') return result.includes('Rechazó');
+                                        if (filterManagement === 'no-answer') return result === 'No contesta' || result === 'Equivocado' || result === 'Cuelgan';
+                                        if (filterManagement === 'sale') return result === 'Aceptó Migración';
                                         return true;
                                     })
                                     .map((client) => {
@@ -263,9 +282,13 @@ export function CampaignManager() {
                                                 statusDot = "bg-green-500 animate-pulse";
                                             } else if (interaction.result === 'Lo pensará') {
                                                 statusDot = "bg-yellow-500";
-                                            } else {
-                                                // Rejected / No answer
+                                            } else if (interaction.result === 'Falla Técnica') {
+                                                statusDot = "bg-blue-500";
+                                            } else if (interaction.result?.includes('Rechazó')) {
                                                 statusDot = "bg-red-500";
+                                            } else {
+                                                // Failed attempts (No answer, etc)
+                                                statusDot = "bg-slate-400";
                                             }
                                         }
 
@@ -294,11 +317,15 @@ export function CampaignManager() {
                                                     </span>
                                                 </td>
                                                 <td className="p-4">
-                                                    <span className={`px-2.5 py-1 rounded-md text-[10px] font-black uppercase tracking-wide border ${client.estado === 'Activo' ? 'bg-emerald-50 text-emerald-700 border-emerald-100' :
-                                                        client.estado === 'Suspendido' ? 'bg-red-50 text-red-700 border-red-100' :
-                                                            'bg-slate-100 text-slate-600 border-slate-200'
+                                                    <span className={`px-2.5 py-1 rounded-md text-[10px] font-black uppercase tracking-wide border ${String(client.estado) === '1' || client.estado === 'Activo' ? 'bg-emerald-50 text-emerald-700 border-emerald-100' :
+                                                        String(client.estado) === '2' || client.estado === 'Suspendido' ? 'bg-red-50 text-red-700 border-red-100' :
+                                                            String(client.estado) === '4' || client.estado === 'Gratis' ? 'bg-blue-50 text-blue-700 border-blue-100' :
+                                                                'bg-slate-100 text-slate-600 border-slate-200'
                                                         }`}>
-                                                        {client.estado}
+                                                        {String(client.estado) === '1' ? 'Activo' :
+                                                            String(client.estado) === '2' ? 'Suspendido' :
+                                                                String(client.estado) === '3' ? 'Cancelado' :
+                                                                    String(client.estado) === '4' ? 'Gratis' : client.estado}
                                                     </span>
                                                 </td>
                                                 <td className="p-4 font-black text-slate-700">
