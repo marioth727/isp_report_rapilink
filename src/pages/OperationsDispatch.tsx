@@ -90,7 +90,7 @@ export function OperationsDispatch() {
     const [selectedTicket, setSelectedTicket] = useState<DispatchTicket | null>(null);
     const [detailLoading, setDetailLoading] = useState<boolean>(false);
     const [mapFilter, setMapFilter] = useState<string | null>(null);
-    const [failureAnalytics, setFailureAnalytics] = useState<Record<string, { count: number, lat: number, lng: number }>>({});
+    const [mapFilter, setMapFilter] = useState<string | null>(null);
     const normalize = (text: string) => text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
 
     // Helper para fecha local (MOVIDO ARRIBA PARA EVITAR LINT ERRORS)
@@ -246,28 +246,7 @@ export function OperationsDispatch() {
             const sorted = poolTickets.sort((a, b) => b.score - a.score);
             setTickets(sorted);
 
-            // ANALÍTICA DE FALLAS PARA MAPA DE CALOR
-            const failureKeywords = ['falla', 'sin internet', 'lento', 'corte', 'intermitente', 'rojo', 'señal', 'soporte'];
-            const failures = enriched.filter(t =>
-                failureKeywords.some(kw => t.asunto.toLowerCase().includes(kw) || t.descripcion?.toLowerCase().includes(kw))
-            );
-
-            // Agrupar fallas por barrio para el mapa de calor
-            const failureGroups: Record<string, { count: number; lat: number; lng: number }> = {};
-            failures.forEach(f => {
-                const b = f.barrio || 'Sin Barrio';
-                if (!failureGroups[b]) {
-                    // Buscar coordenadas base para el barrio
-                    const base = enriched.find(t => t.barrio === b && t.latitud && t.longitud);
-                    failureGroups[b] = {
-                        count: 0,
-                        lat: base ? parseFloat(base.latitud!) : 7.12539,
-                        lng: base ? parseFloat(base.longitud!) : -73.1198
-                    };
-                }
-                failureGroups[b].count++;
-            });
-            setFailureAnalytics(failureGroups);
+            setTickets(sorted);
 
             // Sincronizar assignedRoutes con datos frescos de WispHub (Filtro Anti-Fantasmas)
             // Si un ticket en las rutas ya no viene en los datos de WispHub (porque se cerró), lo quitamos.
@@ -327,6 +306,31 @@ export function OperationsDispatch() {
             return acc;
         }, {} as Record<string, DispatchTicket[]>);
     }, [filteredTickets]);
+
+    // ANALÍTICA DE FALLAS PARA MAPA DE CALOR (REACTIVA AL BARRIO)
+    const failureAnalytics = useMemo(() => {
+        const failureKeywords = ['falla', 'sin internet', 'lento', 'corte', 'intermitente', 'rojo', 'señal', 'soporte'];
+        const failures = tickets.filter(t =>
+            failureKeywords.some(kw => (t.asunto || '').toLowerCase().includes(kw) || (t.descripcion || '').toLowerCase().includes(kw))
+        );
+
+        const groups: Record<string, { count: number; lat: number; lng: number }> = {};
+        failures.forEach(f => {
+            const b = f.barrio || 'Sin Barrio';
+            if (b === 'Sin Barrio') return;
+
+            const nh = neighborhoods[b];
+            if (!groups[b]) {
+                groups[b] = {
+                    count: 0,
+                    lat: nh?.latitude ? parseFloat(nh.latitude) : 7.12539,
+                    lng: nh?.longitude ? parseFloat(nh.longitude) : -73.1198
+                };
+            }
+            groups[b].count++;
+        });
+        return groups;
+    }, [tickets, neighborhoods]);
 
     // Carga Profunda (Timeline)
     useEffect(() => {
