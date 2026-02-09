@@ -1161,6 +1161,35 @@ export const WorkflowService = {
         }
     },
 
+    // --- AUDITORÍA DE DESPACHO ---
+    async logDispatchBatch(technicianCount: number, ticketCount: number, metadata: any = {}) {
+        try {
+            const { data: { user } } = await supabase.auth.getUser();
+            if (!user) {
+                console.error('[logDispatchBatch] 🛑 Error: No hay sesión de usuario activa (user is null).');
+                return false;
+            }
+
+            const { error } = await supabase.from('dispatch_events').insert({
+                user_id: user.id,
+                technician_count: technicianCount,
+                total_tickets: ticketCount,
+                metadata
+            });
+
+            if (error) {
+                console.error('[logDispatchBatch] ❌ Error de Supabase al insertar:', error.message, error.details);
+                return false;
+            }
+
+            console.log(`[logDispatchBatch] ✅ Auditoría guardada: ${ticketCount} tickets / ${technicianCount} técnicos`);
+            return true;
+        } catch (e) {
+            console.error('[logDispatchBatch] Error crítico:', e);
+            return false;
+        }
+    },
+
     // --- SISTEMA DE DESPACHO INTELIGENTE (NOC) ---
 
     /**

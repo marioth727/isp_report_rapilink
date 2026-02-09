@@ -167,6 +167,26 @@ export function OperationsDashboard() {
     const [sendingNote, setSendingNote] = useState(false);
     const [previewImage, setPreviewImage] = useState<string | null>(null);
 
+    const formatDiff = (start: string | null, end: string | null) => {
+        if (!start || !end) return null;
+        try {
+            // Intentar parsear formato WispHub DD/MM/YYYY HH:MM:SS
+            const parseWH = (str: string) => {
+                if (str.includes('/')) {
+                    const [d, m, y, h, min] = str.split(/[\/\s:]/);
+                    return new Date(Number(y), Number(m) - 1, Number(d), Number(h), Number(min)).getTime();
+                }
+                return new Date(str).getTime();
+            };
+            const diffMs = parseWH(end) - parseWH(start);
+            if (diffMs < 0) return null;
+            const mins = Math.floor(diffMs / 60000);
+            const h = Math.floor(mins / 60);
+            const m = mins % 60;
+            return h > 0 ? `${h}h ${m}m` : `${m}m`;
+        } catch (e) { return null; }
+    };
+
     const renderSafe = (val: any, fallback: string = 'N/A') => {
         if (val === null || val === undefined) return fallback;
         if (typeof val === 'object') {
@@ -804,20 +824,45 @@ export function OperationsDashboard() {
                                                 <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
                                                     <div className="flex items-center gap-2 mb-2 text-slate-500">
                                                         <Clock size={12} />
-                                                        <span className="text-[9px] font-bold uppercase">Visita / Inicio</span>
+                                                        <span className="text-[9px] font-bold uppercase">Inicio Trayecto</span>
                                                     </div>
                                                     <p className="text-[10px] font-bold text-slate-700">
-                                                        {renderSafe(ticketDetail?.fecha_visita ? `${ticketDetail.fecha_visita} ${ticketDetail.hora_visita || ''}` : (ticketDetail?.fecha_inicio ? new Date(ticketDetail.fecha_inicio).toLocaleString() : null), 'No definida')}
+                                                        {renderSafe(ticketDetail?.fecha_inicio ? new Date(ticketDetail.fecha_inicio).toLocaleString() : null, 'No iniciada')}
                                                     </p>
                                                 </div>
-                                                <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
-                                                    <div className="flex items-center gap-2 mb-2 text-slate-500">
-                                                        <Clock size={12} />
-                                                        <span className="text-[9px] font-bold uppercase">Fin Estimado</span>
+                                                {ticketDetail?.fecha_llegada && (
+                                                    <div className="bg-blue-50/50 p-4 rounded-2xl border border-blue-100 flex flex-col justify-between">
+                                                        <div>
+                                                            <div className="flex items-center gap-2 mb-2 text-blue-600">
+                                                                <Activity size={12} />
+                                                                <span className="text-[9px] font-bold uppercase">Llegada al Sitio</span>
+                                                            </div>
+                                                            <p className="text-[10px] font-bold text-blue-900">
+                                                                {renderSafe(ticketDetail.fecha_llegada, 'N/A')}
+                                                            </p>
+                                                        </div>
+                                                        <div className="mt-4 pt-2 border-t border-blue-100/50">
+                                                            <span className="text-[8px] font-black text-blue-400 uppercase tracking-widest">Trayecto: </span>
+                                                            <span className="text-[10px] font-black text-blue-700">{formatDiff(ticketDetail.fecha_inicio, ticketDetail.fecha_llegada) || '---'}</span>
+                                                        </div>
                                                     </div>
-                                                    <p className="text-[10px] font-bold text-slate-700">
-                                                        {renderSafe(ticketDetail?.fecha_final || ticketDetail?.fecha_termino ? new Date(ticketDetail.fecha_final || ticketDetail.fecha_termino).toLocaleString() : null, 'No definida')}
-                                                    </p>
+                                                )}
+                                                <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100 flex flex-col justify-between">
+                                                    <div>
+                                                        <div className="flex items-center gap-2 mb-2 text-slate-500">
+                                                            <CheckCircle2 size={12} />
+                                                            <span className="text-[9px] font-bold uppercase">Fin de Trabajo</span>
+                                                        </div>
+                                                        <p className="text-[10px] font-bold text-slate-700">
+                                                            {renderSafe(ticketDetail?.fecha_final || ticketDetail?.fecha_termino ? new Date(ticketDetail.fecha_final || ticketDetail.fecha_termino).toLocaleString() : null, 'En ejecución')}
+                                                        </p>
+                                                    </div>
+                                                    {ticketDetail?.fecha_llegada && (ticketDetail?.fecha_final || ticketDetail?.fecha_termino) && (
+                                                        <div className="mt-4 pt-2 border-t border-slate-200">
+                                                            <span className="text-[8px] font-black text-slate-400 uppercase tracking-widest">En Sitio: </span>
+                                                            <span className="text-[10px] font-black text-emerald-600 font-mono">{formatDiff(ticketDetail.fecha_llegada, ticketDetail.fecha_final || ticketDetail.fecha_termino) || '---'}</span>
+                                                        </div>
+                                                    )}
                                                 </div>
                                             </div>
                                         </section>

@@ -22,4 +22,8 @@ Para evitar bucles infinitos sin solución al depurar errores:
 
 ## 4. Seguridad y Datos
 - Utiliza los workflows definidos en `.agent/workflows/` para tareas comunes como sincronización, auditoría y migraciones.
-- Ante un error persistente (3 intentos), detente y solicita intervención.
+
+## 5. Cero Invención y Fidelidad al Flujo
+- **Restauración Atómica**: En tareas de restauración (POST-GIT-ERROR) o corrección de bugs, está prohibido refactorizar, limpiar o "mejorar" código adyacente. El objetivo es restaurar la funcionalidad 1:1.
+- **Cambios en Estado Global**: Cualquier modificación en variables de estado que afecten el flujo de negocio (ej: `assignedRoutes`, `dispatchManifest`) debe ser explicada y aprobada en el plan inicial.
+- **Interpretación de Negocio**: No asumas flujos automáticos. Si el usuario opera de forma manual, la aplicación debe ser una herramienta de apoyo manual, no un automatismo intrusivo.

@@ -90,16 +90,240 @@ export function OperationsDispatch() {
     const [selectedTicket, setSelectedTicket] = useState<DispatchTicket | null>(null);
     const [detailLoading, setDetailLoading] = useState(false);
     const [mapFilter, setMapFilter] = useState<string | null>(null);
+    const normalize = (text: string) => text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+
+    // Helper para fecha local (MOVIDO ARRIBA PARA EVITAR LINT ERRORS)
+    const getLocalToday = useCallback(() => {
+        return new Date().toLocaleDateString('en-CA');
+    }, []);
+
     const [activeView, setActiveView] = useState<'dispatch' | 'timeline'>('dispatch');
+
+    // MANIFIESTO DE DESPACHO V3: Persistencia de asignación diaria
+    const [dispatchManifest, setDispatchManifest] = useState<Record<string, string>>({});
+    const [enrichedCompleted, setEnrichedCompleted] = useState<any[]>([]);
+    const [isEnriching, setIsEnriching] = useState(false);
 
     // Filtros Operativos
     const [filterTechId, setFilterTechId] = useState<string>('all');
     const [showInstallations, setShowInstallations] = useState<boolean>(false);
+    const [selectedDate, setSelectedDate] = useState<string>(getLocalToday());
 
-    // Ref para control del mapa
+    // Ref para control del mapa (RESTAURADO)
     const mapRef = useRef<L.Map | null>(null);
 
-    // Corregir iconos de Leaflet
+    // SWR HOOKS
+    const { data: techList } = useSWR('platform-users', () => WorkflowService.getPlatformUsers());
+    const { data: rawTickets, mutate: mutateTickets, error: ticketsError } = useSWR('wisphub-operational-tickets',
+        () => WisphubService.getAllTickets({ status: '1,5' }), // Incluimos Rezagados (5)
+        { refreshInterval: 60000, revalidateOnFocus: true }
+    );
+    const { data: inProgressTickets } = useSWR('wisphub-in-progress-tickets',
+        () => WisphubService.getAllTickets({ status: '2' }),
+        { refreshInterval: 60000, revalidateOnFocus: true }
+    );
+    const { data: completedTicketsRaw } = useSWR('wisphub-completed-tickets',
+        () => WisphubService.getAllTickets({ status: '3,4' }),
+        { refreshInterval: 60000, revalidateOnFocus: true }
+    );
+
+    const technicians = useMemo(() => {
+        if (!techList) return [];
+        return techList.filter(u => u.is_field_tech === true);
+    }, [techList]);
+
+    const isTodayResilient = useCallback((dateStr: string | null | undefined) => {
+        if (!dateStr) return false;
+
+        try {
+            let date: Date;
+            if (dateStr.includes('/') || dateStr.includes('-')) {
+                const parts = dateStr.split(/[\/\s-:]/);
+                if (parts.length >= 3) {
+                    const p0 = parseInt(parts[0]);
+                    const p1 = parseInt(parts[1]);
+                    const p2 = parseInt(parts[2]);
+                    const h = parts[3] ? parseInt(parts[3]) : 0;
+                    const m = parts[4] ? parseInt(parts[4]) : 0;
+
+                    if (p0 > 12) {
+                        date = new Date(p2, p1 - 1, p0, h, m);
+                    } else if (p1 > 12) {
+                        date = new Date(p2, p0 - 1, p1, h, m);
+                    } else {
+                        // Por defecto tratar como MM/DD (Formato API WispHub US)
+                        date = new Date(p2, p0 - 1, p1, h, m);
+                    }
+                } else {
+                    date = new Date(dateStr);
+                }
+            } else {
+                date = new Date(dateStr);
+            }
+
+            if (isNaN(date.getTime())) return false;
+
+            // AJUSTE CRÍTICO: Restar 5 horas para normalizar el desfase UTC de la API
+            const normalizedDate = new Date(date.getTime() - (5 * 60 * 60 * 1000));
+            const y = normalizedDate.getFullYear();
+            const mo = String(normalizedDate.getMonth() + 1).padStart(2, '0');
+            const d = String(normalizedDate.getDate()).padStart(2, '0');
+            const normalizedISO = `${y}-${mo}-${d}`;
+
+            return normalizedISO === selectedDate;
+        } catch (e) {
+            return false;
+        }
+    }, [selectedDate]);
+
+    const completedToday = useMemo(() => {
+        if (!completedTicketsRaw) return [];
+        return completedTicketsRaw.filter(t => isTodayResilient(t.fecha_final || t.fecha_fin || t.fecha_termino));
+    }, [completedTicketsRaw, isTodayResilient]);
+
+    // Lógica de Persistencia de Manifiesto
+    useEffect(() => {
+        const stored = localStorage.getItem(`dispatch_manifest_${selectedDate}`);
+        if (stored) {
+            try {
+                const { date, manifest } = JSON.parse(stored);
+                if (date === selectedDate) setDispatchManifest(manifest || {});
+                else setDispatchManifest({});
+            } catch (e) {
+                setDispatchManifest({});
+            }
+        } else {
+            setDispatchManifest({});
+        }
+    }, [selectedDate]);
+
+    const saveManualDispatch = useCallback((newManifestEntries: Record<string, string>, dateStr?: string) => {
+        const date = dateStr || getLocalToday();
+        setDispatchManifest(prev => {
+            const next = { ...prev, ...newManifestEntries };
+            localStorage.setItem(`dispatch_manifest_${date}`, JSON.stringify({ date, manifest: next }));
+            return next;
+        });
+    }, [getLocalToday]);
+
+    // Carga de Borrador de Rutas
+    useEffect(() => {
+        const stored = localStorage.getItem('dispatch_draft_schedule_v1');
+        if (stored) {
+            try {
+                const { date, routes } = JSON.parse(stored);
+                if (date === getLocalToday()) setAssignedRoutes(routes);
+            } catch (e) { }
+        }
+    }, [getLocalToday]);
+
+    // Procesamiento de Tickets (Abiertos y En Progreso para el Pool)
+    useEffect(() => {
+        if (techList !== undefined && rawTickets !== undefined && inProgressTickets !== undefined) {
+            const combined = [...(rawTickets || []), ...(inProgressTickets || [])];
+            processTickets(combined);
+        }
+    }, [rawTickets, inProgressTickets, techList]);
+
+    const processTickets = async (allTickets: any[]) => {
+        setTickets(allTickets.map(t => ({ ...t, barrio: t.barrio || 'Cargando...', score: 0 })));
+        setLoading(false);
+        try {
+            // Obtener todos los IDs que ya están en las rutas para no duplicarlos en el POOL
+            const assignedIds = new Set(Object.values(assignedRoutes).flat().map(t => t.id));
+
+            const enriched = await Promise.all(allTickets.map(async (t) => {
+                const score = await WorkflowService.calculateDispatchScore(t);
+                const barrio = t.barrio || t.servicio_completo?.barrio || t.servicio_completo?.localidad || 'Sin Barrio';
+                const recurrence = await WorkflowService.getClientRecurrence(t.servicio, new Date().getFullYear(), new Date().getMonth() + 1);
+                return { ...t, barrio, score, recurrence, tecnico_actual: t.nombre_tecnico || 'Sin Asignar' };
+            }));
+
+            // El POOL solo debe mostrar tickets que NO están asignados a ningún técnico en la App
+            const poolTickets = enriched.filter(t => !assignedIds.has(t.id));
+            const sorted = poolTickets.sort((a, b) => b.score - a.score);
+            setTickets(sorted);
+
+            // Sincronizar assignedRoutes con datos frescos de WispHub (Filtro Anti-Fantasmas)
+            // Si un ticket en las rutas ya no viene en los datos de WispHub (porque se cerró), lo quitamos.
+            const allValidTicketsMap = new Map(enriched.map(t => [String(t.id), t]));
+            setAssignedRoutes(prev => {
+                const next = { ...prev };
+                Object.keys(next).forEach(techId => {
+                    next[techId] = (next[techId] || [])
+                        .map(t => allValidTicketsMap.get(String(t.id)) || t) // Refrescar datos por si cambió algo
+                        .filter(t => allValidTicketsMap.has(String(t.id))); // Eliminar si ya no existe en WispHub
+                });
+                return next;
+            });
+
+            // Inicializar rutas si están vacías (Lienzo limpio) 
+            if (Object.keys(assignedRoutes).length === 0 && technicians.length > 0) {
+                const initRoutes: Record<string, DispatchTicket[]> = {};
+                technicians.forEach(tech => { initRoutes[tech.id] = []; });
+                setAssignedRoutes(initRoutes);
+            }
+
+            // GeoRef
+            const uniqueBarrios = Array.from(new Set(poolTickets.map(t => t.barrio)));
+            for (const b of uniqueBarrios) {
+                if (!neighborhoods[b]) {
+                    WorkflowService.getNeighborhoodGeoref(b).then(ref => {
+                        if (ref) setNeighborhoods(prev => ({ ...prev, [b]: ref }));
+                    });
+                }
+            }
+        } catch (e) { }
+    };
+
+    // Filtro para Vista de Despacho (Pool)
+    const filteredTickets = useMemo(() => {
+        // Obtenemos los IDs asignados actualizados
+        const assignedIds = new Set(Object.values(assignedRoutes).flat().map(t => t.id));
+
+        return tickets
+            .filter(t => !assignedIds.has(t.id)) // Doble filtro de seguridad para el pool
+            .filter(t => {
+                const matchesSearch = !searchQuery || normalize(t.nombre_cliente).includes(normalize(searchQuery)) || normalize(t.barrio).includes(normalize(searchQuery));
+                const selectedTech = technicians.find(tech => tech.id === filterTechId);
+                const matchesTech = filterTechId === 'all' || (selectedTech?.full_name && t.tecnico_actual && normalize(t.tecnico_actual).includes(normalize(selectedTech.full_name)));
+                const isInstallationTech = t.tecnico_actual && (normalize(t.tecnico_actual).includes('instalaciones@rapilink-sas') || normalize(t.tecnico_actual).includes('instalaciones'));
+                const matchesInstall = !showInstallations || isInstallationTech;
+                const matchesMap = !mapFilter || t.barrio === mapFilter;
+                return matchesSearch && matchesTech && matchesInstall && matchesMap;
+            });
+    }, [tickets, assignedRoutes, searchQuery, filterTechId, showInstallations, mapFilter, technicians]);
+
+    const ticketsByNeighborhood = useMemo(() => {
+        return filteredTickets.reduce((acc, t) => {
+            if (!t.barrio || t.barrio === 'Sin Barrio') return acc;
+            if (!acc[t.barrio]) acc[t.barrio] = [];
+            acc[t.barrio].push(t);
+            return acc;
+        }, {} as Record<string, DispatchTicket[]>);
+    }, [filteredTickets]);
+
+    // Carga Profunda (Timeline)
+    useEffect(() => {
+        if (activeView === 'timeline' && completedToday.length > 0 && !isEnriching) {
+            const enrich = async () => {
+                setIsEnriching(true);
+                const enriched = [];
+                const toProcess = completedToday.slice(0, 30);
+                for (const t of toProcess) {
+                    try {
+                        const detail = await WisphubService.getTicketDetail(t.id);
+                        enriched.push({ ...t, ...detail });
+                    } catch (e) { enriched.push(t); }
+                }
+                setEnrichedCompleted(enriched);
+                setIsEnriching(false);
+            };
+            enrich();
+        }
+    }, [activeView, completedToday.length]);
+
+    // Iconos de Leaflet
     useEffect(() => {
         const DefaultIcon = L.icon({
             iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
@@ -110,289 +334,79 @@ export function OperationsDispatch() {
         L.Marker.prototype.options.icon = DefaultIcon;
     }, []);
 
-    // SWR para Técnicos
-    const { data: techList } = useSWR('platform-users', () => WorkflowService.getPlatformUsers());
-    const technicians = useMemo(() => {
-        if (!techList) return [];
-        return techList.filter(u => u.is_field_tech === true);
-    }, [techList]);
-
-    // SWR para Tickets iniciales (se procesarán en useEffect para agregar scoring/barrios)
-    const { data: rawTickets, mutate: mutateTickets, error: ticketsError } = useSWR('wisphub-pending-tickets',
-        () => WisphubService.getAllTickets({ status: '1' }),
-        { refreshInterval: 300000, revalidateOnFocus: true }
-    );
-
-
-    useEffect(() => {
-        // Si ya tenemos los datos básicos (aunque estén vacíos), procesamos.
-        // Solo esperamos si techList o rawTickets son undefined (cargando de red).
-        if (techList !== undefined && rawTickets !== undefined) {
-            processTickets(rawTickets || []);
-        }
-    }, [rawTickets, techList, technicians]);
-
-    const processTickets = async (allTickets: any[]) => {
-        console.log(`[Dispatch] Iniciando procesamiento de ${allTickets.length} tickets...`);
-
-        // 1. Mapeo rápido inicial (lo que ya mapeó WisphubService)
-        const initialTickets: DispatchTicket[] = allTickets.map(t => ({
-            ...t,
-            barrio: t.barrio || 'Cargando...',
-            score: t.score || 0,
-            recurrence: t.recurrence || 0,
-            tecnico_actual: t.nombre_tecnico || 'Sin Asignar'
-        }));
-
-        setTickets(initialTickets);
-
-        // Quitar el loading principal rápido si ya tenemos tickets
-        if (initialTickets.length > 0) setLoading(false);
-
-        try {
-            // 2. Procesamiento "Smart" (Scoring, Barrios, Recurrencia)
-            // Lo hacemos en paralelo pero con un límite o progresivamente
-            const enriched = await Promise.all(allTickets.map(async (t) => {
-                try {
-                    const score = await WorkflowService.calculateDispatchScore(t);
-                    const barrio = t.servicio_completo?.barrio || t.servicio_completo?.localidad || 'Sin Barrio';
-                    const recurrence = await WorkflowService.getClientRecurrence(t.servicio, new Date().getFullYear(), new Date().getMonth() + 1);
-
-                    return {
-                        ...t,
-                        barrio,
-                        score,
-                        recurrence,
-                        tecnico_actual: t.nombre_tecnico || 'Sin Asignar'
-                    };
-                } catch (e) {
-                    console.error(`[Dispatch] Error enriqueciendo ticket ${t.id}:`, e);
-                    return { ...t, barrio: 'Error', score: 0, recurrence: 0 };
-                }
-            }));
-
-            const sorted = enriched.sort((a, b) => b.score - a.score);
-            setTickets(sorted);
-            console.log(`[Dispatch] Enriquecimiento completado para ${sorted.length} tickets.`);
-
-            // 3. Inicializar rutas
-            if (Object.keys(assignedRoutes).length === 0 || Object.keys(assignedRoutes).length !== technicians.length) {
-                const initRoutes: Record<string, DispatchTicket[]> = {};
-                technicians.forEach(tech => {
-                    initRoutes[tech.id] = [];
-                });
-                setAssignedRoutes(initRoutes);
-            }
-
-            // 4. Georef (Baja prioridad)
-            const uniqueBarrios = Array.from(new Set(sorted.map(t => t.barrio)));
-            const georefMap: Record<string, any> = { ...neighborhoods };
-            for (const b of uniqueBarrios) {
-                if (!georefMap[b]) {
-                    WorkflowService.getNeighborhoodGeoref(b).then(ref => {
-                        if (ref) setNeighborhoods(prev => ({ ...prev, [b]: ref }));
-                    });
-                }
-            }
-        } catch (error) {
-            console.error('[Dispatch] Error en enriquecimiento batch:', error);
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    // Cargar detalles extendidos al seleccionar un ticket
-    useEffect(() => {
-        if (selectedTicket && (!selectedTicket.creado_por || selectedTicket.creado_por === 'Sistema')) {
-            loadTicketDetail(selectedTicket.id);
-        }
-    }, [selectedTicket?.id]);
-
-    const loadTicketDetail = async (id: string) => {
-        setDetailLoading(true);
-        try {
-            const detail = await WisphubService.getTicketDetail(id);
-            if (detail && selectedTicket && detail.id === selectedTicket.id) {
-                // Fusionar con datos existentes para no perder el score/barrio
-                setSelectedTicket({
-                    ...selectedTicket,
-                    ...detail,
-                    tecnico_actual: detail.nombre_tecnico || selectedTicket.tecnico_actual
-                });
-            }
-        } catch (error) {
-            console.error("Error loading ticket detail:", error);
-        } finally {
-            setDetailLoading(false);
-        }
-    };
-
-
-    // ==================== UTILIDADES DE FILTRADO ====================
-    const normalize = (text: string) => text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
-
-    // Tickets filtrados (usados en Lista y Mapa)
-    const filteredTickets = useMemo(() => {
-        return tickets.filter(t => {
-            // Filtro por Buscador
-            const matchesSearch = !searchQuery ||
-                normalize(t.nombre_cliente).includes(normalize(searchQuery)) ||
-                normalize(t.barrio).includes(normalize(searchQuery));
-
-            // Filtro por Técnico (Dropdown) - Buscamos por nombre ya que WispHub devuelve nombres
-            const selectedTech = technicians.find(tech => tech.id === filterTechId);
-            const matchesTech = filterTechId === 'all' ||
-                (selectedTech?.full_name && t.tecnico_actual && normalize(t.tecnico_actual).includes(normalize(selectedTech.full_name)));
-
-
-            // Filtro por Instalación - Restringido al técnico de instalaciones según memoria técnica
-            const isInstallationTech = t.tecnico_actual && (
-                normalize(t.tecnico_actual).includes('instalaciones@rapilink-sas') ||
-                normalize(t.tecnico_actual).includes('instalaciones')
-            );
-            const matchesInstall = !showInstallations || isInstallationTech;
-
-            // Filtro por Mapa (Barrio seleccionado)
-            const matchesMap = !mapFilter || t.barrio === mapFilter;
-
-            return matchesSearch && matchesTech && matchesInstall && matchesMap;
-        });
-    }, [tickets, searchQuery, filterTechId, showInstallations, mapFilter, technicians]);
-
-    // Agrupar tickets por barrio para el mapa
-    const ticketsByNeighborhood = useMemo(() => {
-        return filteredTickets.reduce((acc, t) => {
-            if (!t.barrio || t.barrio === 'Sin Barrio') return acc;
-            if (!acc[t.barrio]) acc[t.barrio] = [];
-            acc[t.barrio].push(t);
-            return acc;
-        }, {} as Record<string, DispatchTicket[]>);
-    }, [filteredTickets]);
-
-
-    // ==================== ANIMACIÓN DE MAPA ====================
-    const calculateBounds = useCallback(() => {
-        const visibleMarkers = filteredTickets.filter(t =>
-            neighborhoods[t.barrio]?.latitude && neighborhoods[t.barrio]?.longitude
-        );
-
-        if (visibleMarkers.length === 0) return null;
-
-        const coords = visibleMarkers.map(t => [
-            Number(neighborhoods[t.barrio].latitude),
-            Number(neighborhoods[t.barrio].longitude)
-        ] as [number, number]);
-
-        return L.latLngBounds(coords);
-    }, [filteredTickets, neighborhoods]);
-
-    useEffect(() => {
-        if (!mapRef.current || activeView !== 'dispatch') return; // Only adjust bounds if dispatch view is active
-        const bounds = calculateBounds();
-        if (bounds) {
-            mapRef.current.flyToBounds(bounds, { padding: [50, 50], duration: 1 });
-        }
-    }, [calculateBounds, activeView]);
-
-
-    // ==================== DRAG & DROP FIX ====================
     const onDragEnd = (result: DropResult) => {
         const { source, destination, draggableId } = result;
         if (!destination) return;
-
-        // Mismo lugar
         if (source.droppableId === destination.droppableId && source.index === destination.index) return;
-
-        // Buscar el ticket por ID
         let movedItem: DispatchTicket | undefined;
         if (source.droppableId === 'unassigned') {
             movedItem = tickets.find(t => t.id === draggableId);
         } else {
             movedItem = assignedRoutes[source.droppableId]?.find(t => t.id === draggableId);
         }
-
-        if (!movedItem) {
-            console.error('❌ [Drag] No se encontró el ticket:', draggableId);
-            return;
-        }
-
-        // Remover del origen
+        if (!movedItem) return;
         if (source.droppableId === 'unassigned') {
             setTickets(prev => prev.filter(t => t.id !== draggableId));
         } else {
-            setAssignedRoutes(prev => ({
-                ...prev,
-                [source.droppableId]: prev[source.droppableId].filter(t => t.id !== draggableId)
-            }));
+            setAssignedRoutes(prev => ({ ...prev, [source.droppableId]: prev[source.droppableId].filter(t => t.id !== draggableId) }));
         }
-
-        // Agregar al destino
         if (destination.droppableId === 'unassigned') {
             setTickets(prev => [...prev, movedItem!]);
         } else {
-            setAssignedRoutes(prev => ({
-                ...prev,
-                [destination.droppableId]: [...(prev[destination.droppableId] || []), movedItem!]
-            }));
+            setAssignedRoutes(prev => ({ ...prev, [destination.droppableId]: [...(prev[destination.droppableId] || []), movedItem!] }));
         }
-
-        console.log(`✅ [Drag] Movido ${movedItem.nombre_cliente} a ${destination.droppableId}`);
     };
 
     const handlePublish = async () => {
-        const totalToAssign = Object.values(assignedRoutes).flat().length;
-        if (totalToAssign === 0) {
-            alert('No hay tickets asignados para publicar.');
-            return;
-        }
-
-        if (!confirm(`¿Estás seguro de que deseas publicar ${totalToAssign} tickets? Se actualizará el técnico en WispHub de forma masiva.`)) {
-            return;
-        }
-
+        const total = Object.values(assignedRoutes).flat().length;
+        if (total === 0 || !confirm(`¿Deseas publicar ${total} tickets?`)) return;
         setLoading(true);
         try {
+            const manifestEntries: Record<string, string> = {};
             for (const [techId, routeTickets] of Object.entries(assignedRoutes)) {
                 if (routeTickets.length === 0) continue;
-
                 const technician = technicians.find(t => t.id === techId);
-                if (!technician) continue;
-
                 for (const ticket of routeTickets) {
-                    console.log(`[Publish] Reasignando ticket ${ticket.id} a ${technician.full_name}...`);
                     await WorkflowService.changeWispHubTechnician(ticket.id, techId);
+                    if (technician) manifestEntries[ticket.id] = technician.full_name;
                 }
             }
-            alert('¡Despacho publicado con éxito! Los técnicos ya tienen sus rutas en WispHub.');
+            saveManualDispatch(manifestEntries);
             mutateTickets();
-        } catch (error) {
-            console.error('Error publishing dispatch:', error);
-            alert('Error al publicar el despacho. Revisa la consola para más detalles.');
-        } finally {
-            setLoading(false);
-        }
+            alert('¡Despacho Publicado!');
+        } catch (e) {
+            alert('Error al publicar despacho.');
+        } finally { setLoading(false); }
     };
+
+    const calculateBounds = useCallback(() => {
+        const visible = filteredTickets.filter(t => neighborhoods[t.barrio]?.latitude);
+        if (visible.length === 0) return null;
+        return L.latLngBounds(visible.map(t => [Number(neighborhoods[t.barrio].latitude), Number(neighborhoods[t.barrio].longitude)]));
+    }, [filteredTickets, neighborhoods]);
+
+    useEffect(() => {
+        if (!mapRef.current || activeView !== 'dispatch') return;
+        const bounds = calculateBounds();
+        if (bounds) mapRef.current.flyToBounds(bounds, { padding: [50, 50] });
+    }, [calculateBounds, activeView]);
+
+    const loadTicketDetail = async (id: string) => {
+        setDetailLoading(true);
+        try {
+            const detail = await WisphubService.getTicketDetail(id);
+            if (detail && selectedTicket?.id === id) {
+                setSelectedTicket({ ...selectedTicket, ...detail });
+            }
+        } catch (e) { } finally { setDetailLoading(false); }
+    };
+    useEffect(() => { if (selectedTicket && !selectedTicket.creado_por) loadTicketDetail(selectedTicket.id); }, [selectedTicket?.id]);
 
     if ((loading || !rawTickets || !techList) && !ticketsError) {
         return (
             <div className="flex flex-col items-center justify-center min-h-[400px] gap-4">
                 <Loader2 className="w-12 h-12 animate-spin text-primary" />
-                <div className="text-center space-y-2">
-                    <p className="text-xs font-black uppercase tracking-widest text-muted-foreground animate-pulse">
-                        {!techList ? 'Sincronizando Técnicos...' : !rawTickets ? 'Obteniendo Tickets de WispHub...' : 'Calculando rutas óptimas y prioridades...'}
-                    </p>
-                    {rawTickets && (
-                        <p className="text-[10px] font-bold text-primary uppercase">
-                            Procesando {rawTickets.length} tickets encontrados...
-                        </p>
-                    )}
-                </div>
-                <button
-                    onClick={() => setLoading(false)}
-                    className="text-[10px] font-black uppercase text-muted-foreground hover:text-primary transition-colors mt-4"
-                >
-                    Forzar entrada (Ignorar carga)
-                </button>
+                <p className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Sincronizando Sistema...</p>
             </div>
         );
     }
@@ -401,16 +415,7 @@ export function OperationsDispatch() {
         return (
             <div className="flex flex-col items-center justify-center min-h-[400px] gap-4 p-8 border-2 border-dashed border-destructive/20 rounded-[2rem] bg-destructive/5 text-center">
                 <AlertCircle className="w-12 h-12 text-destructive" />
-                <div className="space-y-1">
-                    <h3 className="font-black uppercase text-lg">Error de Comunicación</h3>
-                    <p className="text-sm font-medium text-muted-foreground tracking-tight">WispHub no responde o la sesión en el navegador expiró.</p>
-                </div>
-                <button
-                    onClick={() => mutateTickets()}
-                    className="bg-destructive text-destructive-foreground px-6 py-2 rounded-xl font-black uppercase text-xs hover:scale-105 transition-all shadow-lg mt-2"
-                >
-                    Reintentar Conexión
-                </button>
+                <button onClick={() => mutateTickets()} className="bg-destructive text-white px-6 py-2 rounded-xl font-black uppercase text-xs">Reintentar Conexión</button>
             </div>
         );
     }
@@ -467,8 +472,66 @@ export function OperationsDispatch() {
                         ) : (
                             <div className="w-full h-full overflow-y-auto custom-scrollbar pt-40 px-6 bg-slate-50">
                                 <OperationalTimeline
-                                    tickets={filteredTickets}
+                                    // Solo pasamos tickets que están en el Borrador (assignedRoutes) 
+                                    // o que ya fueron despachados hoy (dispatchManifest)
+                                    // Inyectamos _assignedTechId para que el Timeline sepa a quién pertenecen
+                                    tickets={[
+                                        ...Object.entries(assignedRoutes).flatMap(([techId, routes]) =>
+                                            routes.map(t => ({ ...t, _assignedTechId: techId }))
+                                        ),
+                                        ...(tickets
+                                            .filter(t => dispatchManifest[String(t.id)] && !Object.values(assignedRoutes).flat().some(at => String(at.id) === String(t.id)))
+                                            .map(t => {
+                                                const techName = dispatchManifest[String(t.id)];
+                                                const tech = technicians.find(ft => ft.full_name === techName);
+                                                return { ...t, _assignedTechId: tech?.id };
+                                            })
+                                        ),
+                                        // FALLBACK DE SEGURIDAD: Tickets que están en el manifiesto pero WispHub
+                                        // aún no los reporta ni en activos ni en completados (Transición)
+                                        ...Object.keys(dispatchManifest)
+                                            .filter(id => {
+                                                const isInActive = tickets.some(t => String(t.id) === id);
+                                                const isInCompleted = (enrichedCompleted.length > 0 ? enrichedCompleted : completedToday).some(t => String(t.id) === id);
+                                                const isInRoute = Object.values(assignedRoutes).flat().some(at => String(at.id) === id);
+                                                return !isInActive && !isInCompleted && !isInRoute;
+                                            })
+                                            .map(id => {
+                                                const techName = dispatchManifest[id];
+                                                const tech = technicians.find(ft => ft.full_name === techName);
+                                                return {
+                                                    id,
+                                                    nombre_cliente: 'Actualizando WispHub...',
+                                                    barrio: '...',
+                                                    asunto: 'Sincronizando estado',
+                                                    _assignedTechId: tech?.id,
+                                                    _forceTimeline: true
+                                                };
+                                            })
+                                    ]}
                                     fieldTechnicians={technicians}
+                                    // En progreso solo lo que nosotros despachamos hoy
+                                    inProgressTickets={(inProgressTickets || [])
+                                        .filter(t => dispatchManifest[String(t.id)] || Object.values(assignedRoutes).flat().some(at => String(at.id) === String(t.id)))
+                                        .map(t => {
+                                            const techIdFromRoute = Object.entries(assignedRoutes).find(([_, routes]) => routes.some(at => String(at.id) === String(t.id)))?.[0];
+                                            const techName = dispatchManifest[String(t.id)];
+                                            const techFromManifest = technicians.find(ft => ft.full_name === techName);
+                                            return { ...t, _assignedTechId: techIdFromRoute || techFromManifest?.id };
+                                        })
+                                    }
+                                    // Completados solo lo que nosotros despachamos hoy
+                                    // Agregamos una capa de seguridad: si el ticket está en el manifiesto pero no aparece aún en completados ni en activos,
+                                    // es que está en proceso de cierre o transición.
+                                    completedTickets={[
+                                        ...(enrichedCompleted.length > 0 ? enrichedCompleted : completedToday)
+                                            .filter(t => dispatchManifest[String(t.id)])
+                                            .map(t => {
+                                                const techName = dispatchManifest[String(t.id)];
+                                                const tech = technicians.find(ft => ft.full_name === techName);
+                                                return { ...t, _assignedTechId: tech?.id };
+                                            })
+                                    ]}
                                 />
                             </div>
                         )}
@@ -504,24 +567,53 @@ export function OperationsDispatch() {
                         </div>
 
                         {/* SELECTOR DE VISTA (TABS) */}
-                        <div className="bg-slate-100/50 backdrop-blur-xl p-1 rounded-2xl flex gap-1 pointer-events-auto border border-slate-200">
+                        <div className="flex gap-2">
+                            <div className="bg-slate-100/50 backdrop-blur-xl p-1 rounded-2xl flex gap-1 pointer-events-auto border border-slate-200">
+                                <button
+                                    onClick={() => setActiveView('dispatch')}
+                                    className={clsx(
+                                        "px-6 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all",
+                                        activeView === 'dispatch' ? "bg-white text-primary shadow-sm" : "text-slate-400 hover:text-slate-600"
+                                    )}
+                                >
+                                    Mapa de Despacho
+                                </button>
+                                <button
+                                    onClick={() => setActiveView('timeline')}
+                                    className={clsx(
+                                        "px-6 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all",
+                                        activeView === 'timeline' ? "bg-white text-primary shadow-sm" : "text-slate-400 hover:text-slate-600"
+                                    )}
+                                >
+                                    Jornada Operativa
+                                </button>
+                            </div>
+
+                            {activeView === 'timeline' && (
+                                <div className="bg-white/80 backdrop-blur-xl p-1 rounded-2xl flex gap-1 pointer-events-auto border border-slate-200">
+                                    <input
+                                        type="date"
+                                        value={selectedDate}
+                                        onChange={(e) => setSelectedDate(e.target.value)}
+                                        className="bg-transparent px-4 py-1.5 text-[10px] font-black uppercase tracking-widest text-primary outline-none"
+                                    />
+                                </div>
+                            )}
+
                             <button
-                                onClick={() => setActiveView('dispatch')}
-                                className={clsx(
-                                    "px-6 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all",
-                                    activeView === 'dispatch' ? "bg-white text-primary shadow-sm" : "text-slate-400 hover:text-slate-600"
-                                )}
+                                onClick={() => {
+                                    if (confirm(`¿Cerrar Jornada de ${selectedDate}? Se limpiarán los borradores y el manifiesto local de este día.`)) {
+                                        localStorage.removeItem('dispatch_draft_schedule_v1');
+                                        localStorage.removeItem(`dispatch_manifest_${selectedDate}`);
+                                        setAssignedRoutes({});
+                                        setDispatchManifest({});
+                                        window.location.reload();
+                                    }
+                                }}
+                                title="Limpiar todo para empezar de cero"
+                                className="bg-white/80 backdrop-blur-xl p-2 rounded-2xl border border-white/50 shadow-sm pointer-events-auto hover:bg-red-50 hover:text-red-500 transition-all text-slate-400"
                             >
-                                Mapa de Despacho
-                            </button>
-                            <button
-                                onClick={() => setActiveView('timeline')}
-                                className={clsx(
-                                    "px-6 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all",
-                                    activeView === 'timeline' ? "bg-white text-primary shadow-sm" : "text-slate-400 hover:text-slate-600"
-                                )}
-                            >
-                                Jornada Operativa
+                                <X size={20} />
                             </button>
                         </div>
                     </div>
@@ -691,29 +783,44 @@ export function OperationsDispatch() {
                                         <h2 className="text-sm font-black text-white uppercase tracking-tighter leading-none">Asignación</h2>
                                         <span className="text-[8px] font-bold text-white/40 uppercase tracking-widest mt-1">Hoy</span>
                                     </div>
-                                    <button
-                                        onClick={handlePublish}
-                                        disabled={loading || Object.keys(assignedRoutes).length === 0}
-                                        className={clsx(
-                                            "px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-2",
-                                            loading || Object.keys(assignedRoutes).length === 0
-                                                ? "bg-slate-800 text-slate-500 cursor-not-allowed border border-white/5"
-                                                : "bg-primary text-white shadow-lg shadow-primary/20 hover:scale-105 active:scale-95 border border-primary/20"
-                                        )}
-                                    >
-                                        {loading ? <Loader2 className="animate-spin" size={12} /> : (
-                                            <>
-                                                <CloudUpload size={12} />
-                                                <span>Publicar</span>
-                                            </>
-                                        )}
-                                    </button>
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            onClick={() => {
+                                                const today = getLocalToday();
+                                                localStorage.setItem('dispatch_draft_schedule_v1', JSON.stringify({
+                                                    date: today,
+                                                    routes: assignedRoutes
+                                                }));
+                                                alert('Borrador guardado localmente');
+                                            }}
+                                            className="px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all bg-slate-800 text-primary hover:bg-slate-700 border border-primary/20"
+                                        >
+                                            Borrador
+                                        </button>
+                                        <button
+                                            onClick={handlePublish}
+                                            disabled={loading || Object.keys(assignedRoutes).length === 0}
+                                            className={clsx(
+                                                "px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-2",
+                                                loading || Object.keys(assignedRoutes).length === 0
+                                                    ? "bg-slate-800 text-slate-500 cursor-not-allowed border border-white/5"
+                                                    : "bg-primary text-white shadow-lg shadow-primary/20 hover:scale-105 active:scale-95 border border-primary/20"
+                                            )}
+                                        >
+                                            {loading ? <Loader2 className="animate-spin" size={12} /> : (
+                                                <>
+                                                    <CloudUpload size={12} />
+                                                    <span>Publicar</span>
+                                                </>
+                                            )}
+                                        </button>
+                                    </div>
                                 </div>
 
                                 {/* LISTA DE TÉCNICOS */}
                                 <div className="flex-1 bg-white/70 backdrop-blur-3xl p-5 rounded-[2.5rem] border border-white/50 shadow-[0_25px_50px_rgba(0,0,0,0.05)] overflow-hidden pointer-events-auto animate-in slide-in-from-right-8 duration-700 delay-200">
                                     <div className="flex flex-col gap-5 h-full">
-                                        <div className="custom-scrollbar pr-2 flex-1">
+                                        <div className="custom-scrollbar pr-2 flex-1 overflow-y-auto min-h-0 pl-1">
                                             {technicians.map((tech) => (
                                                 <div key={tech.id} className="mb-6">
                                                     <div className="flex items-center gap-2 px-2 py-1.5 hover:bg-slate-50/80 transition-colors group cursor-default">

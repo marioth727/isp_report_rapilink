@@ -574,33 +574,34 @@ export const WisphubService = {
             await this.getStaff();
 
             const pageSize = 50;
-            let baseUrl = `${BASE_URL}/tickets/?limit=50&offset=0&ordering=-id`;
+            let baseUrl = `${BASE_URL}/tickets/?limit=${pageSize}&offset=0&ordering=-id`;
 
+            if (filters?.status) {
+                baseUrl += `&id_estado=${filters.status}`;
+            }
+
+            // Lógica de fechas
             if (filters?.startDate || filters?.endDate) {
                 const start = filters.startDate || '2024-01-01';
                 const end = filters.endDate || new Date().toISOString().split('T')[0];
                 baseUrl += `&fecha_creacion_0=${start}&fecha_creacion_1=${end}`;
-            } else if (filters?.status === '1') {
-                // Para despacho (abiertos), buscamos los últimos 60 días para asegurar no perder nada histórico pero ser rápidos
+            } else if (filters?.status && (filters.status.includes('1') || filters.status.includes('2'))) {
                 const past = new Date();
-                past.setDate(past.getDate() - 60);
+                past.setDate(past.getDate() - 60); // WispHub NO acepta más de 60 días
                 const start = past.toISOString().split('T')[0];
                 const end = new Date().toISOString().split('T')[0];
                 baseUrl += `&fecha_creacion_0=${start}&fecha_creacion_1=${end}`;
             } else {
                 const past = new Date();
-                past.setDate(past.getDate() - 15); // Por defecto solo 15 días si no hay filtro para ser ultra rápidos
+                past.setDate(past.getDate() - 30);
                 const start = past.toISOString().split('T')[0];
                 const end = new Date().toISOString().split('T')[0];
                 baseUrl += `&fecha_creacion_0=${start}&fecha_creacion_1=${end}`;
             }
 
-            if (filters?.status) baseUrl += `&id_estado=${filters.status}`;
+            console.log(`[REQUEST] URL Base: ${baseUrl}`);
 
-            console.log(`[REQUEST] URL: ${baseUrl}`);
             const firstResponse = await safeFetch(baseUrl);
-            console.log(`[RESPONSE] Status: ${firstResponse.status} for URL: ${baseUrl}`);
-
             if (!firstResponse.ok) return [];
 
             const firstData = await firstResponse.json();
@@ -610,16 +611,14 @@ export const WisphubService = {
             // Procesar primera página
             (firstData.results || []).forEach((t: any) => {
                 const mapped = this.mapTicket(t);
-                // Filtrar localmente si se solicitó un estado
-                if (!filters?.status || String(mapped.id_estado) === String(filters.status)) {
+                // Si enviamos id_estado en la URL, WispHub ya filtra, pero reforzamos localmente por si acaso
+                const filterStatus = String(filters?.status || '');
+                if (!filterStatus || filterStatus.split(',').includes(String(mapped.id_estado))) {
                     uniqueTicketsMap.set(mapped.id, mapped);
                 }
             });
 
             if (onProgress) onProgress(uniqueTicketsMap.size, totalCount);
-
-            // Si ya tenemos suficientes o no hay más qué pedir
-            if (uniqueTicketsMap.size >= totalCount || uniqueTicketsMap.size >= 1000) return Array.from(uniqueTicketsMap.values());
 
             const remainingOffsets = [];
             for (let offset = pageSize; offset < totalCount && offset < 1000; offset += pageSize) {
@@ -631,26 +630,21 @@ export const WisphubService = {
                 const response = await safeFetch(pageUrl);
                 if (response.ok) {
                     const data = await response.json();
-                    console.log(`[RESPONSE] Offset ${offset} - Total Page Results: ${data.results?.length || 0}`);
-
                     (data.results || []).forEach((t: any) => {
                         const mapped = this.mapTicket(t);
-                        // Filtrar localmente por estado y evitar duplicados
-                        if (!filters?.status || String(mapped.id_estado) === String(filters.status)) {
+                        const filterStatus = String(filters?.status || '');
+                        if (!filterStatus || filterStatus.split(',').includes(String(mapped.id_estado))) {
                             uniqueTicketsMap.set(mapped.id, mapped);
                         }
                     });
-
                     if (onProgress) onProgress(uniqueTicketsMap.size, totalCount);
                 }
-                await new Promise(r => setTimeout(r, 200));
-
-                // Limite de seguridad de 1000 tickets por estado
+                await new Promise(r => setTimeout(r, 150));
                 if (uniqueTicketsMap.size >= 1000) break;
             }
 
             const finalResults = Array.from(uniqueTicketsMap.values());
-            console.log(`[SUCCESS] WisphubService.getAllTickets finalizó con ${finalResults.length} tickets mapeados (Deduplicados y Filtrados).`);
+            console.log(`[SUCCESS] WisphubService.getAllTickets finalizó con ${finalResults.length} tickets mapeados.`);
             return finalResults;
         } catch (error) {
             console.error("[WispHub] Error loading all tickets:", error);
@@ -663,6 +657,29 @@ export const WisphubService = {
         if (!t.nombre_cliente && !t.cliente && !t.cliente_nombre) {
             console.warn(`[Wisphub Diagnostic] Ticket #${t.id} sin campos de nombre estándar. Keys:`, Object.keys(t));
         }
+
+        // --- EXTRACCIÓN DE HORA DE LLEGADA (NUEVO) ---
+        let fechaLlegada: string | null = null;
+        if (t.respuestas && Array.isArray(t.respuestas)) {
+            const ARRIVAL_PATTERNS = [
+                'llegada al destino',
+                'llegada al sitio',
+                'ha llegado a la ubicación',
+                'llegada a ubicación'
+            ];
+
+            // WispHub ordena las respuestas de más reciente a más antigua usualmente,
+            // pero para la llegada queremos la primera ocurrencia si por alguna razón hay varias
+            const arrivalComment = t.respuestas.find((r: any) => {
+                const text = (r.respuesta || '').toLowerCase();
+                return ARRIVAL_PATTERNS.some(p => text.includes(p));
+            });
+
+            if (arrivalComment && arrivalComment.created) {
+                fechaLlegada = arrivalComment.created;
+            }
+        }
+
         const now = new Date();
         const createdDate = new Date(t.fecha_creacion || t.created_at || t.fecha);
         const diffMs = now.getTime() - createdDate.getTime();
@@ -744,6 +761,37 @@ export const WisphubService = {
             finalAsunto = temp;
         }
 
+        // --- EXTRACCIÓN INTELIGENTE PARA INSTALACIONES NUEVAS ---
+        let extractedDireccion = serviceObj?.direccion || t.direccion || '';
+        let extractedBarrio = serviceObj?.barrio || serviceObj?.localidad || t.barrio || '';
+        let extractedCedula = finalCedula;
+
+        const isNewInstallation = finalAsunto.toUpperCase().includes('INSTALACION');
+        const isAddressUnknown = !extractedDireccion || extractedDireccion.toUpperCase().includes('DESCONOCIDO') || extractedDireccion.trim() === '';
+
+        if (isNewInstallation && isAddressUnknown && t.descripcion) {
+            const cleanDesc = t.descripcion.replace(/<[^>]*>?/gm, ' ')
+                .replace(/&nbsp;/g, ' ')
+                .replace(/&Oacute;/g, 'Ó')
+                .replace(/&Uacute;/g, 'Ú')
+                .replace(/\s+/g, ' ')
+                .trim();
+
+            const extractField = (text: string, fieldName: string) => {
+                const regex = new RegExp(`${fieldName}\\s*(.*?)(?=\\s+[A-ZÁÉÍÓÚÑ]{3,}|$)`, 'i');
+                const match = text.match(regex);
+                return match ? match[1].trim() : null;
+            };
+
+            const extrBarrio = extractField(cleanDesc, 'BARRIO');
+            const extrDireccion = extractField(cleanDesc, 'DIRECCIÓN DE RESIDENCIA');
+            const extrCedula = extractField(cleanDesc, 'NÚMERO DE DOCUMENTO DE IDENTIDAD');
+
+            if (extrBarrio) extractedBarrio = extrBarrio;
+            if (extrDireccion) extractedDireccion = extrDireccion;
+            if (extrCedula) extractedCedula = extrCedula;
+        }
+
         const statusText = String(t.estado || t.nombre_estado || 'Nuevo');
         let finalNombreEstado = statusText;
         let finalIdEstado = Number(t.id_estado);
@@ -774,7 +822,7 @@ export const WisphubService = {
             id: String(t.id_ticket || t.id || "0"),
             asunto: finalAsunto,
             nombre_cliente: finalClientName,
-            cedula: finalCedula,
+            cedula: extractedCedula,
             prioridad: priorityLabels[priorityKey] || "Normal",
             id_prioridad: Number(priorityKey),
             nombre_estado: finalNombreEstado,
@@ -805,6 +853,9 @@ export const WisphubService = {
             horas_abierto: diffHours,
             sla_status: diffHours > 48 ? 'critico' : diffHours > 24 ? 'amarillo' : 'verde',
             fecha_creacion: t.fecha_creacion || t.created_at || t.fecha,
+            fecha_inicio: t.fecha_inicio || null,
+            fecha_final: t.fecha_fin || t.fecha_final || t.fecha_termino || null,
+            fecha_llegada: fechaLlegada,
             creado_por: (() => {
                 const creatorId = String(t.creado_por || t.created_by || "").toLowerCase().trim();
                 if (!creatorId) return 'Sistema';
@@ -821,7 +872,8 @@ export const WisphubService = {
             })(),
             descripcion: t.descripcion || '',
             // Campos extendidos de servicio (útiles para despacho y detalles)
-            direccion: serviceObj?.direccion || t.direccion || '',
+            direccion: extractedDireccion,
+            barrio: extractedBarrio || 'Sin Barrio',
             telefono: serviceObj?.telefono || t.telefono || '',
             celular: serviceObj?.celular || t.celular || '',
             usuario_wisphub: serviceObj?.usuario ||
@@ -960,13 +1012,22 @@ export const WisphubService = {
             const currentComments = client?.comentarios || '';
             const timestamp = new Date().toLocaleString('es-CO', { hour12: false });
             const updatedComments = `${currentComments}\n[${timestamp}]: ${newComment}`.trim();
+            return this.updateClient(serviceId, { comentarios: updatedComments });
+        } catch (error) {
+            return false;
+        }
+    },
+
+    async updateClient(serviceId: number | string, data: any): Promise<boolean> {
+        try {
             const response = await safeFetch(`${BASE_URL}/clientes/${serviceId}/`, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ comentarios: updatedComments })
+                body: JSON.stringify(data)
             });
             return response.ok;
-        } catch (error) {
+        } catch (e) {
+            console.error('[WispHub] Error updating client:', e);
             return false;
         }
     },
