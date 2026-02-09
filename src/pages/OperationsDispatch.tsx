@@ -785,6 +785,16 @@ export function OperationsDispatch() {
                                                                         <div className="flex items-center justify-between mb-2">
                                                                             <div className="flex items-center gap-2">
                                                                                 <div className="px-2 py-0.5 bg-slate-100 rounded text-[9px] font-bold text-slate-500 uppercase">#{ticket.id}</div>
+                                                                                <div className={clsx(
+                                                                                    "px-2 py-0.5 rounded text-[9px] font-bold uppercase",
+                                                                                    ticket.horas_abierto > 48 ? "bg-red-100 text-red-600" :
+                                                                                        ticket.horas_abierto > 24 ? "bg-amber-100 text-amber-600" :
+                                                                                            "bg-emerald-100 text-emerald-600"
+                                                                                )}>
+                                                                                    {ticket.horas_abierto >= 24
+                                                                                        ? `${Math.floor(ticket.horas_abierto / 24)}d ${ticket.horas_abierto % 24}h`
+                                                                                        : `${ticket.horas_abierto}h`}
+                                                                                </div>
                                                                                 {ticket.id_prioridad >= 4 && (
                                                                                     <div className="bg-red-50 text-red-500 text-[8px] font-black px-1.5 py-0.5 rounded border border-red-100 uppercase">Muy Urgente</div>
                                                                                 )}
