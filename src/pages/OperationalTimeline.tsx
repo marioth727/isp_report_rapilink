@@ -35,6 +35,8 @@ interface TimelineTicket {
     latencia_trayecto?: number; // Inicio -> Llegada
     duracion?: number; // Inicio -> Fin (Total)
     duracion_trabajo?: number; // Llegada -> Fin (Efectivo)
+    runningTime?: number; // Tiempo actual en ejecución
+    isStuck?: boolean; // Si lleva > 3h en ejecución
     estado: 'pendiente' | 'en_proceso' | 'resuelto' | 'terminado' | 'rezagado';
 }
 
@@ -240,6 +242,19 @@ export function OperationalTimeline({
                 duracion_trabajo = Math.floor((endDate.getTime() - arrivalDate.getTime()) / 60000);
             }
 
+            // LÓGICA DE SUPERVISIÓN: Detectar tickets estancados (> 3 horas)
+            let isStuck = false;
+            let runningTime: number | undefined;
+            const state = calculateTicketState(t);
+
+            if (state === 'en_proceso' && startDate) {
+                const now = new Date();
+                runningTime = Math.floor((now.getTime() - startDate.getTime()) / 60000);
+                if (runningTime > 180) { // 3 Horas
+                    isStuck = true;
+                }
+            }
+
             // Asegurar que no tengamos tiempos negativos por errores de registro
             if (latencia_trayecto !== undefined && latencia_trayecto < 0) latencia_trayecto = 0;
             if (duracion !== undefined && duracion < 0) duracion = 0;
@@ -261,6 +276,8 @@ export function OperationalTimeline({
                 latencia_trayecto,
                 duracion,
                 duracion_trabajo,
+                runningTime,
+                isStuck,
                 estado: calculateTicketState(t)
             });
             processedTicketIds.add(String(t.id));
@@ -420,8 +437,19 @@ function TicketRow({ ticket }: { ticket: TimelineTicket }) {
                     {config.icon}
                 </div>
                 <div>
-                    <h4 className="text-[11px] font-black text-slate-900 group-hover:text-primary transition-colors">#{ticket.id} - {ticket.nombre_cliente}</h4>
+                    <div className="flex items-center gap-2">
+                        <h4 className="text-[11px] font-[1000] text-slate-900 group-hover:text-primary transition-colors uppercase tracking-tight">#{ticket.id} - {ticket.nombre_cliente}</h4>
+                        {ticket.isStuck && (
+                            <div className="flex items-center gap-1.5 px-2 py-0.5 bg-red-50 border border-red-100 rounded-full animate-pulse">
+                                <div className="w-1.5 h-1.5 bg-red-500 rounded-full" />
+                                <span className="text-[8px] font-black text-red-600 uppercase tracking-widest">Cuello de Botella</span>
+                            </div>
+                        )}
+                    </div>
                     <p className="text-[10px] text-slate-500 font-medium">{ticket.barrio} | {ticket.asunto}</p>
+                    {ticket.isStuck && (
+                        <p className="text-[9px] font-bold text-red-500 mt-1 italic">⚠️ El técnico lleva {Math.floor(ticket.runningTime! / 60)}h {(ticket.runningTime! % 60)}m en este ticket. Verificar inconvenientes.</p>
+                    )}
                 </div>
             </div>
 

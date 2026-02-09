@@ -16,7 +16,7 @@ import {
     CloudUpload,
     CloudDownload
 } from 'lucide-react';
-import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Popup, Circle } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd';
@@ -88,8 +88,9 @@ export function OperationsDispatch() {
     const [searchQuery, setSearchQuery] = useState('');
     const [neighborhoods, setNeighborhoods] = useState<Record<string, any>>({});
     const [selectedTicket, setSelectedTicket] = useState<DispatchTicket | null>(null);
-    const [detailLoading, setDetailLoading] = useState(false);
+    const [detailLoading, setDetailLoading] = useState<boolean>(false);
     const [mapFilter, setMapFilter] = useState<string | null>(null);
+    const [failureAnalytics, setFailureAnalytics] = useState<Record<string, { count: number, lat: number, lng: number }>>({});
     const normalize = (text: string) => text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
 
     // Helper para fecha local (MOVIDO ARRIBA PARA EVITAR LINT ERRORS)
@@ -107,6 +108,8 @@ export function OperationsDispatch() {
     // Filtros Operativos
     const [filterTechId, setFilterTechId] = useState<string>('all');
     const [showInstallations, setShowInstallations] = useState<boolean>(false);
+    const [showHeatmap, setShowHeatmap] = useState<boolean>(false);
+    const [failureAnalytics, setFailureAnalytics] = useState<Record<string, { count: number, lat: number, lng: number }>>({});
     const [selectedDate, setSelectedDate] = useState<string>(getLocalToday());
 
     // Ref para control del mapa (RESTAURADO)
@@ -243,6 +246,29 @@ export function OperationsDispatch() {
             const poolTickets = enriched.filter(t => !assignedIds.has(t.id));
             const sorted = poolTickets.sort((a, b) => b.score - a.score);
             setTickets(sorted);
+
+            // ANALÍTICA DE FALLAS PARA MAPA DE CALOR
+            const failureKeywords = ['falla', 'sin internet', 'lento', 'corte', 'intermitente', 'rojo', 'señal', 'soporte'];
+            const failures = enriched.filter(t =>
+                failureKeywords.some(kw => t.asunto.toLowerCase().includes(kw) || t.descripcion?.toLowerCase().includes(kw))
+            );
+
+            // Agrupar fallas por barrio para el mapa de calor
+            const failureGroups: Record<string, { count: number; lat: number; lng: number }> = {};
+            failures.forEach(f => {
+                const b = f.barrio || 'Sin Barrio';
+                if (!failureGroups[b]) {
+                    // Buscar coordenadas base para el barrio
+                    const base = enriched.find(t => t.barrio === b && t.latitud && t.longitud);
+                    failureGroups[b] = {
+                        count: 0,
+                        lat: base ? parseFloat(base.latitud!) : 7.12539,
+                        lng: base ? parseFloat(base.longitud!) : -73.1198
+                    };
+                }
+                failureGroups[b].count++;
+            });
+            setFailureAnalytics(failureGroups);
 
             // Sincronizar assignedRoutes con datos frescos de WispHub (Filtro Anti-Fantasmas)
             // Si un ticket en las rutas ya no viene en los datos de WispHub (porque se cerró), lo quitamos.
@@ -468,6 +494,26 @@ export function OperationsDispatch() {
                                         </Marker>
                                     );
                                 })}
+
+                                {showHeatmap && Object.entries(failureAnalytics).map(([bName, data]) => (
+                                    <Circle
+                                        key={`heat-${bName}`}
+                                        center={[data.lat, data.lng]}
+                                        radius={200 + (data.count * 100)}
+                                        pathOptions={{
+                                            fillColor: data.count > 4 ? '#ef4444' : data.count > 2 ? '#f97316' : '#eab308',
+                                            color: 'transparent',
+                                            fillOpacity: 0.4
+                                        }}
+                                    >
+                                        <Popup>
+                                            <div className="p-1 text-center">
+                                                <p className="text-[10px] font-black uppercase text-red-600">{bName}</p>
+                                                <p className="text-[9px] font-bold">Fallas Técnicas: {data.count}</p>
+                                            </div>
+                                        </Popup>
+                                    </Circle>
+                                ))}
                             </MapContainer>
                         ) : (
                             <div className="w-full h-full overflow-y-auto custom-scrollbar pt-40 px-6 bg-slate-50">
@@ -577,6 +623,16 @@ export function OperationsDispatch() {
                                     )}
                                 >
                                     Mapa de Despacho
+                                </button>
+                                <button
+                                    onClick={() => setShowHeatmap(!showHeatmap)}
+                                    className={clsx(
+                                        "px-4 py-2 rounded-xl text-[8px] font-black uppercase tracking-widest transition-all flex items-center gap-2",
+                                        showHeatmap ? "bg-red-500 text-white shadow-lg" : "bg-white/50 text-slate-500 hover:text-red-500"
+                                    )}
+                                >
+                                    <div className={clsx("w-2 h-2 rounded-full", showHeatmap ? "bg-white animate-pulse" : "bg-red-500")} />
+                                    Mapa de Calor
                                 </button>
                                 <button
                                     onClick={() => setActiveView('timeline')}
