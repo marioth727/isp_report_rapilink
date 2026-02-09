@@ -995,7 +995,7 @@ export function InteractionForm({ onSuccess, initialValues, preSelectedClient, p
                                         <Clock className={clsx("absolute left-3 top-2.5 w-4 h-4", isManualDuration ? "text-amber-500" : "text-green-600")} />
                                         <input
                                             type="number"
-                                            step="0.1"
+                                            step="any"
                                             {...register('duration_min', {
                                                 onChange: handleManualDurationChange
                                             })}
