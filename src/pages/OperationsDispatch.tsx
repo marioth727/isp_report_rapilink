@@ -396,7 +396,7 @@ export function OperationsDispatch() {
                 const technician = technicians.find(t => t.id === techId);
                 for (const ticket of routeTickets) {
                     await WorkflowService.changeWispHubTechnician(ticket.id, techId);
-                    if (technician) manifestEntries[ticket.id] = technician.full_name;
+                    if (technician) manifestEntries[ticket.id] = technician.full_name || 'Desconocido';
                 }
             }
             saveManualDispatch(manifestEntries);
