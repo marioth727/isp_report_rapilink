@@ -293,3 +293,32 @@ La vista de despacho (`OperationsDispatch.tsx`) utiliza una arquitectura de capa
 - **Fuentes**: Uso agresivo de `font-[1000]` para títulos.
 - **Identificación**: La C.C. del cliente siempre está en la cabecera del panel de detalles (`text-[10px] uppercase`).
 - **Filtrado Dinámico**: El mapa DEBE reaccionar al filtro de técnico instantáneamente.
+## 7. Normalización Horaria y Resiliencia de Fechas
+
+> [!CRITICAL]
+> **Fecha**: 2026-02-08  
+> **Contexto**: Resolución de desaparición de tickets nocturnos y errores en métricas de tiempo (43201m).
+
+### Desfase Horario de la API (UTC+5)
+Se identificó que la API de WispHub (especialmente en los campos de cierre como `fecha_fin` o `fecha_final`) a menudo devuelve timestamps con un desfase de **+5 horas** respecto a la hora local de Colombia/Ecuador (UTC-5).
+- **Problema**: Un ticket cerrado a las 7:00 PM aparece en la API como cerrado a las 00:00 AM del día siguiente.
+- **Impacto**: Los tickets cerrados al final de la jornada "desaparecían" del Timeline de hoy porque la App pensaba que pertenecían al mañana.
+- **Solución**: Implementación de una resta constante de 5 horas (`- 5 * 60 * 60 * 1000`) en los métodos de filtrado y cálculo de métricas para normalizar los datos a hora local.
+
+### Conflictos de Formato: MM/DD vs DD/MM (El bug de los 43201m)
+WispHub utiliza inconsistencia de formatos en sus respuestas de API:
+- **Formato US (MM/DD/YYYY)**: Frecuente en respuestas de tickets individuales y en el campo `fecha_fin`.
+- **Formato Latam (DD/MM/YYYY)**: Usado en otras partes de la interfaz y reportes.
+
+**El Error de los 43201m:**
+Al interpretar `02/09/2026` (9 de febrero) como `02 de Septiembre`, la App calculaba una duración de 30 días (+43,000 minutos) en lugar de unos pocos minutos.
+
+**Solución (Heurística de Parseo):**
+Se implementó una lógica de autodetcción en `isTodayResilient` y `parseWH`:
+1. Si el primer número es `> 12`, se asume **DD/MM**.
+2. Si el segundo número es `> 12`, se asume **MM/DD**.
+3. Si ambos son `<= 12`, se asume por defecto **MM/DD** (estándar interno de la API de WispHub).
+
+### Estrategia de Sincronización Fallback
+Para evitar que un ticket "parpadee" o desaparezca mientras WispHub actualiza sus índices globales, se creó un estado de **"Sincronizando estado"**:
+- Si un ticket ya no aparece en la lista de "Abiertos" pero aún no ha sido reportado en la lista de "Terminados" de la API, la App mantiene el ticket visible con un indicador de carga hasta que la confirmación oficial llega vía SWR.
