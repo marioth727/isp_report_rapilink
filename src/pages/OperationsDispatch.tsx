@@ -90,7 +90,6 @@ export function OperationsDispatch() {
     const [selectedTicket, setSelectedTicket] = useState<DispatchTicket | null>(null);
     const [detailLoading, setDetailLoading] = useState<boolean>(false);
     const [mapFilter, setMapFilter] = useState<string | null>(null);
-    const [mapFilter, setMapFilter] = useState<string | null>(null);
     const normalize = (text: string) => text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
 
     // Helper para fecha local (MOVIDO ARRIBA PARA EVITAR LINT ERRORS)
