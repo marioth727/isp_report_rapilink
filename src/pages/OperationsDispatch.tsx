@@ -109,7 +109,6 @@ export function OperationsDispatch() {
     const [filterTechId, setFilterTechId] = useState<string>('all');
     const [showInstallations, setShowInstallations] = useState<boolean>(false);
     const [showHeatmap, setShowHeatmap] = useState<boolean>(false);
-    const [failureAnalytics, setFailureAnalytics] = useState<Record<string, { count: number, lat: number, lng: number }>>({});
     const [selectedDate, setSelectedDate] = useState<string>(getLocalToday());
 
     // Ref para control del mapa (RESTAURADO)
