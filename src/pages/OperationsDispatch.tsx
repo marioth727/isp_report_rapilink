@@ -680,41 +680,39 @@ export function OperationsDispatch() {
                     {activeView === 'dispatch' && (
                         <div className="grid grid-cols-[280px_1fr_300px] gap-4 w-full h-full">
                             {/* Columna Izquierda: Control & Pool */}
-                            <div className="flex flex-col gap-4 h-full overflow-hidden">
-                                {/* Widget: Filtros Operativos */}
-                                <div className="bg-white/70 backdrop-blur-3xl p-6 rounded-[2rem] border border-white/50 shadow-[0_20px_40px_rgba(0,0,0,0.05)] pointer-events-auto animate-in slide-in-from-left-8 duration-500">
-                                    <div className="flex items-center justify-between mb-6">
+                            <div className="w-[320px] flex flex-col gap-3 h-full overflow-hidden pointer-events-none">
+                                {/* Widget: Filtros */}
+                                <div className="bg-white/80 backdrop-blur-2xl p-4 rounded-3xl border border-white/50 shadow-xl pointer-events-auto animate-in slide-in-from-left-8 duration-700">
+                                    <div className="flex items-center justify-between mb-3 px-1">
                                         <div className="flex items-center gap-2">
-                                            <div className="w-2 h-6 bg-primary rounded-full" />
-                                            <h2 className="text-sm font-black uppercase tracking-tight text-slate-900">Filtros</h2>
+                                            <div className="w-1.5 h-5 bg-primary rounded-full"></div>
+                                            <h2 className="text-[10px] font-black uppercase tracking-widest text-slate-800">Filtros</h2>
                                         </div>
-                                        <div className="px-2 py-1 bg-slate-100 rounded-lg">
-                                            <span className="text-[10px] font-black text-slate-500">{filteredTickets.length} / {tickets.length}</span>
+                                        <div className="bg-slate-100 px-2 py-0.5 rounded-full text-[10px] font-black text-slate-500 tabular-nums">
+                                            {filteredTickets.length} / {tickets.length}
                                         </div>
                                     </div>
 
-                                    <div className="flex flex-col gap-5">
-                                        <div className="space-y-1.5">
-                                            <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
-                                                <User size={10} /> Técnico Asignado
-                                            </label>
+                                    <div className="space-y-3">
+                                        <div>
+                                            <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest ml-1 mb-1 block">Técnico Asignado</label>
                                             <div className="relative">
                                                 <select
                                                     value={filterTechId}
                                                     onChange={(e) => setFilterTechId(e.target.value)}
-                                                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-xs font-bold text-slate-700 outline-none focus:ring-1 focus:ring-primary/20 transition-all appearance-none pr-10"
+                                                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-[10px] font-bold text-slate-700 outline-none focus:ring-1 focus:ring-primary/20 transition-all appearance-none pr-8"
                                                 >
                                                     <option value="all">Todos los Técnicos</option>
                                                     {technicians.map(t => (
                                                         <option key={t.id} value={t.id}>{t.full_name}</option>
                                                     ))}
                                                 </select>
-                                                <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" size={14} />
+                                                <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" size={12} />
                                             </div>
                                         </div>
 
-                                        <div className="flex items-center justify-between p-3 bg-slate-50 rounded-2xl border border-slate-200/50">
-                                            <label className="flex items-center gap-3 cursor-pointer group">
+                                        <div className="flex items-center justify-between p-2.5 bg-slate-50 rounded-xl border border-slate-200/50">
+                                            <label className="flex items-center gap-2 cursor-pointer group">
                                                 <div className="relative">
                                                     <input
                                                         type="checkbox"
@@ -722,48 +720,46 @@ export function OperationsDispatch() {
                                                         onChange={(e) => setShowInstallations(e.target.checked)}
                                                         className="sr-only peer"
                                                     />
-                                                    <div className="w-10 h-5 bg-slate-200 rounded-full peer peer-checked:bg-primary transition-all duration-300"></div>
-                                                    <div className="absolute left-1 top-1 w-3 h-3 bg-white rounded-full peer-checked:translate-x-5 transition-all duration-300 shadow-sm"></div>
+                                                    <div className="w-8 h-4 bg-slate-200 rounded-full peer peer-checked:bg-primary transition-all duration-300"></div>
+                                                    <div className="absolute left-0.5 top-0.5 w-3 h-3 bg-white rounded-full peer-checked:translate-x-4 transition-all duration-300 shadow-sm"></div>
                                                 </div>
-                                                <span className="text-[10px] font-black uppercase text-slate-600 group-hover:text-primary transition-colors">Ver Instalaciones</span>
+                                                <span className="text-[9px] font-black uppercase text-slate-600 group-hover:text-primary transition-colors tracking-tight">Ver Instalaciones</span>
                                             </label>
                                         </div>
                                     </div>
                                 </div>
 
                                 {/* Widget: Pool de Tickets Pendientes */}
-                                <div className="flex-1 flex flex-col min-h-0 bg-white/70 backdrop-blur-3xl rounded-[2.5rem] border border-white/50 shadow-[0_25px_50px_rgba(0,0,0,0.05)] overflow-hidden pointer-events-auto animate-in slide-in-from-left-8 duration-700 delay-150">
-                                    <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+                                <div className="flex-1 flex flex-col min-h-0 bg-white/70 backdrop-blur-3xl rounded-[1.5rem] border border-white/50 shadow-2xl overflow-hidden pointer-events-auto animate-in slide-in-from-left-8 duration-700 delay-150">
+                                    <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between bg-white/50">
                                         <div className="flex items-center gap-2">
-                                            <div className="p-2 bg-primary/10 rounded-xl">
-                                                <Truck size={14} className="text-primary" />
-                                            </div>
-                                            <h2 className="text-xs font-black uppercase tracking-tight text-slate-800">Pool Pendientes</h2>
+                                            <Truck size={12} className="text-primary" />
+                                            <h2 className="text-[10px] font-black uppercase tracking-tight text-slate-800">Pool Pendientes</h2>
                                         </div>
                                     </div>
 
-                                    <div className="px-5 py-4">
+                                    <div className="px-3 py-2.5">
                                         <div className="relative">
-                                            <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
                                             <input
                                                 type="text"
                                                 placeholder="Buscar..."
                                                 value={searchQuery}
                                                 onChange={(e) => setSearchQuery(e.target.value)}
-                                                className="w-full bg-slate-50 border border-slate-200 rounded-[1.25rem] pl-12 pr-4 py-3 text-xs font-bold text-slate-700 outline-none focus:bg-white focus:ring-1 focus:ring-primary/20 transition-all border-dashed"
+                                                className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-3 py-2 text-[10px] font-bold text-slate-700 outline-none focus:bg-white transition-all"
                                             />
                                         </div>
                                     </div>
 
-                                    <div className="flex-1 overflow-y-auto custom-scrollbar px-5 pb-6">
+                                    <div className="flex-1 overflow-y-auto custom-scrollbar px-3 pb-4">
                                         <Droppable droppableId="unassigned">
                                             {(provided, snapshot) => (
                                                 <div
                                                     {...provided.droppableProps}
                                                     ref={provided.innerRef}
                                                     className={clsx(
-                                                        "min-h-[200px] transition-all duration-300 rounded-2xl",
-                                                        snapshot.isDraggingOver ? "bg-primary/5 ring-2 ring-primary/20 ring-dashed" : "bg-transparent"
+                                                        "min-h-[200px] transition-all duration-300 rounded-xl",
+                                                        snapshot.isDraggingOver ? "bg-primary/5 ring-1 ring-primary/20 ring-dashed" : "bg-transparent"
                                                     )}
                                                 >
                                                     {filteredTickets.map((ticket, index) => (
@@ -775,18 +771,18 @@ export function OperationsDispatch() {
                                                                         {...provided.draggableProps}
                                                                         {...provided.dragHandleProps}
                                                                         className={clsx(
-                                                                            "group p-3 mb-2 rounded-xl transition-all border shadow-sm",
+                                                                            "group p-2.5 mb-1.5 rounded-xl transition-all border shadow-sm",
                                                                             snapshot.isDragging
-                                                                                ? "bg-white shadow-[0_15px_30px_rgba(var(--primary-rgb),0.15)] border-primary ring-2 ring-primary/10 rotate-2 z-[9999] opacity-100 scale-105"
-                                                                                : "bg-white border-slate-100 hover:border-primary/20 hover:shadow-md hover:-translate-y-0.5"
+                                                                                ? "bg-white shadow-xl border-primary ring-2 ring-primary/10 rotate-1 z-[9999] opacity-100 scale-105"
+                                                                                : "bg-white border-slate-100 hover:border-primary/30 hover:shadow-md"
                                                                         )}
                                                                         onClick={() => setSelectedTicket(ticket)}
                                                                     >
-                                                                        <div className="flex items-center justify-between mb-2">
-                                                                            <div className="flex items-center gap-2">
-                                                                                <div className="px-2 py-0.5 bg-slate-100 rounded text-[9px] font-bold text-slate-500 uppercase">#{ticket.id}</div>
+                                                                        <div className="flex items-center justify-between mb-1">
+                                                                            <div className="flex items-center gap-1.5 flex-wrap">
+                                                                                <div className="px-1.5 py-0.5 bg-slate-100 rounded text-[8px] font-black text-slate-500 uppercase tracking-tighter">#{ticket.id}</div>
                                                                                 <div className={clsx(
-                                                                                    "px-2 py-0.5 rounded text-[9px] font-bold uppercase",
+                                                                                    "px-1.5 py-0.5 rounded text-[8px] font-black uppercase tracking-tighter",
                                                                                     ticket.horas_abierto > 48 ? "bg-red-100 text-red-600" :
                                                                                         ticket.horas_abierto > 24 ? "bg-amber-100 text-amber-600" :
                                                                                             "bg-emerald-100 text-emerald-600"
@@ -795,18 +791,18 @@ export function OperationsDispatch() {
                                                                                         ? `${Math.floor(ticket.horas_abierto / 24)}d ${ticket.horas_abierto % 24}h`
                                                                                         : `${ticket.horas_abierto}h`}
                                                                                 </div>
-                                                                                {ticket.id_prioridad >= 4 && (
-                                                                                    <div className="bg-red-50 text-red-500 text-[8px] font-black px-1.5 py-0.5 rounded border border-red-100 uppercase">Muy Urgente</div>
-                                                                                )}
                                                                             </div>
+                                                                            {ticket.id_prioridad >= 4 && (
+                                                                                <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse shadow-[0_0_8px_rgba(239,68,68,0.5)]"></div>
+                                                                            )}
                                                                         </div>
-                                                                        <h3 className="text-xs font-black text-slate-900 group-hover:text-primary transition-colors leading-tight mb-1">{ticket.nombre_cliente}</h3>
-                                                                        <div className="flex items-center gap-1.5 text-slate-400">
-                                                                            <MapPin size={10} className="text-primary/60" />
-                                                                            <span className="text-[10px] font-bold uppercase tracking-tight truncate">{ticket.barrio}</span>
+                                                                        <h3 className="text-[11px] font-black text-slate-900 group-hover:text-primary transition-colors leading-[1.1] mb-1 line-clamp-2">{ticket.nombre_cliente}</h3>
+                                                                        <div className="flex items-center gap-1 text-slate-400">
+                                                                            <MapPin size={8} className="text-primary/60 shrink-0" />
+                                                                            <span className="text-[9px] font-bold uppercase tracking-tight truncate">{ticket.barrio}</span>
                                                                         </div>
-                                                                        <div className="mt-2 pt-2 border-t border-slate-50">
-                                                                            <span className="block text-[9px] font-black text-slate-400 uppercase tracking-widest truncate">{ticket.asunto}</span>
+                                                                        <div className="mt-1.5 pt-1 border-t border-slate-50 flex justify-between items-center gap-2">
+                                                                            <span className="text-[8px] font-black text-slate-400 uppercase tracking-widest truncate flex-1">{ticket.asunto}</span>
                                                                         </div>
                                                                     </div>
                                                                 );
