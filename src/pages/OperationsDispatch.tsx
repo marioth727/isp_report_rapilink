@@ -366,22 +366,66 @@ export function OperationsDispatch() {
         const { source, destination, draggableId } = result;
         if (!destination) return;
         if (source.droppableId === destination.droppableId && source.index === destination.index) return;
-        let movedItem: DispatchTicket | undefined;
-        if (source.droppableId === 'unassigned') {
-            movedItem = tickets.find(t => t.id === draggableId);
-        } else {
-            movedItem = assignedRoutes[source.droppableId]?.find(t => t.id === draggableId);
+
+        // Caso 1: Reordenamiento dentro de la misma lista
+        if (source.droppableId === destination.droppableId) {
+            if (source.droppableId === 'unassigned') {
+                setTickets(prev => {
+                    const newList = Array.from(prev);
+                    const [removed] = newList.splice(source.index, 1);
+                    newList.splice(destination.index, 0, removed);
+                    return newList;
+                });
+            } else {
+                setAssignedRoutes(prev => {
+                    const newList = Array.from(prev[source.droppableId] || []);
+                    const [removed] = newList.splice(source.index, 1);
+                    newList.splice(destination.index, 0, removed);
+                    return { ...prev, [source.droppableId]: newList };
+                });
+            }
+            return;
         }
-        if (!movedItem) return;
+
+        // Caso 2: Movimiento entre listas diferentes
+        const itemToMove = source.droppableId === 'unassigned'
+            ? tickets[source.index]
+            : (assignedRoutes[source.droppableId] || [])[source.index];
+
+        if (!itemToMove) return;
+
+        // Remover de origen e insertar en destino
         if (source.droppableId === 'unassigned') {
             setTickets(prev => prev.filter(t => t.id !== draggableId));
+            setAssignedRoutes(prev => {
+                const destList = Array.from(prev[destination.droppableId] || []);
+                destList.splice(destination.index, 0, itemToMove);
+                return { ...prev, [destination.droppableId]: destList };
+            });
+        } else if (destination.droppableId === 'unassigned') {
+            setAssignedRoutes(prev => ({
+                ...prev,
+                [source.droppableId]: (prev[source.droppableId] || []).filter(t => t.id !== draggableId)
+            }));
+            setTickets(prev => {
+                const newList = Array.from(prev);
+                newList.splice(destination.index, 0, itemToMove);
+                return newList;
+            });
         } else {
-            setAssignedRoutes(prev => ({ ...prev, [source.droppableId]: prev[source.droppableId].filter(t => t.id !== draggableId) }));
-        }
-        if (destination.droppableId === 'unassigned') {
-            setTickets(prev => [...prev, movedItem!]);
-        } else {
-            setAssignedRoutes(prev => ({ ...prev, [destination.droppableId]: [...(prev[destination.droppableId] || []), movedItem!] }));
+            // Entre dos técnicos diferentes
+            setAssignedRoutes(prev => {
+                const newRoutes = { ...prev };
+                const sourceList = Array.from(newRoutes[source.droppableId] || []);
+                const destList = Array.from(newRoutes[destination.droppableId] || []);
+
+                sourceList.splice(source.index, 1);
+                destList.splice(destination.index, 0, itemToMove);
+
+                newRoutes[source.droppableId] = sourceList;
+                newRoutes[destination.droppableId] = destList;
+                return newRoutes;
+            });
         }
     };
 
