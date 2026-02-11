@@ -590,26 +590,26 @@ export function OperationsDispatch() {
                 <div className="absolute inset-0 z-10 p-3 md:p-4 pointer-events-none overflow-hidden">
                     {/* CAPA 1.1: ENCABEZADO FLOTANTE (CENTRAL) */}
                     <div className="absolute top-6 left-1/2 -translate-x-1/2 z-[200] flex flex-col items-center gap-3 w-full pointer-events-none">
-                        {/* CENTRO DE DESPACHO & STATS */}
-                        <div className="flex items-center gap-8 bg-white/60 backdrop-blur-3xl px-10 py-4 rounded-[2.5rem] border border-white/50 shadow-xl pointer-events-auto">
-                            <div className="flex items-center gap-4">
-                                <div className="flex items-center gap-2 px-3 py-1 bg-emerald-50 rounded-full border border-emerald-100 animate-pulse">
-                                    <div className="w-2 h-2 bg-emerald-500 rounded-full shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
-                                    <span className="text-[9px] font-black text-emerald-600 uppercase tracking-widest">En Vivo</span>
+                        {/* CENTRO DE DESPACHO & STATS (ULTRA-COMPACTO) */}
+                        <div className="flex items-center gap-6 bg-white/60 backdrop-blur-3xl px-6 py-2.5 rounded-full border border-white/50 shadow-lg pointer-events-auto">
+                            <div className="flex items-center gap-3">
+                                <div className="flex items-center gap-1.5 px-2 py-0.5 bg-emerald-50 rounded-full border border-emerald-100 animate-pulse">
+                                    <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full shadow-[0_0_6px_rgba(16,185,129,0.5)]" />
+                                    <span className="text-[8px] font-black text-emerald-600 uppercase tracking-widest">Vivo</span>
                                 </div>
-                                <h1 className="text-2xl font-black text-slate-900 uppercase tracking-tighter leading-none">
+                                <h1 className="text-xl font-black text-slate-900 uppercase tracking-tighter leading-none">
                                     Centro de Despacho
                                 </h1>
                             </div>
 
-                            <div className="flex items-center gap-8 pl-8 border-l border-slate-200/50">
+                            <div className="flex items-center gap-6 pl-6 border-l border-slate-200/50">
                                 <div className="flex flex-col">
-                                    <span className="text-[9px] font-black text-slate-400 uppercase tracking-[0.2em] mb-1 leading-none">Barrios</span>
-                                    <span className="text-2xl font-black text-slate-900 tracking-tighter leading-none tabular-nums">{Object.keys(neighborhoods).length}</span>
+                                    <span className="text-[8px] font-black text-slate-400 uppercase tracking-[0.2em] mb-0.5 leading-none">Barrios</span>
+                                    <span className="text-xl font-black text-slate-900 tracking-tighter leading-none tabular-nums">{Object.keys(neighborhoods).length}</span>
                                 </div>
                                 <div className="flex flex-col">
-                                    <span className="text-[9px] font-black text-slate-400 uppercase tracking-[0.2em] mb-1 leading-none">Tickets</span>
-                                    <span className="text-2xl font-black text-slate-900 tracking-tighter leading-none tabular-nums">{filteredTickets.length}</span>
+                                    <span className="text-[8px] font-black text-slate-400 uppercase tracking-[0.2em] mb-0.5 leading-none">Tickets</span>
+                                    <span className="text-xl font-black text-slate-900 tracking-tighter leading-none tabular-nums">{filteredTickets.length}</span>
                                 </div>
                             </div>
                         </div>
