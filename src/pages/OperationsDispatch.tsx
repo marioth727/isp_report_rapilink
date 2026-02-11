@@ -590,60 +590,60 @@ export function OperationsDispatch() {
                 <div className="absolute inset-0 z-10 p-3 md:p-4 pointer-events-none overflow-hidden">
                     {/* CAPA 1.1: ENCABEZADO FLOTANTE (CENTRAL) */}
                     <div className="absolute top-6 left-1/2 -translate-x-1/2 z-[200] flex flex-col items-center gap-3 w-full pointer-events-none">
-                        <div className="bg-white/80 backdrop-blur-3xl px-10 py-4 rounded-[2.5rem] border border-white/50 shadow-[0_20px_50px_rgba(0,0,0,0.1)] flex items-center gap-6 pointer-events-auto transition-all hover:shadow-[0_25px_60px_rgba(0,0,0,0.15)]">
+                        {/* CENTRO DE DESPACHO & STATS */}
+                        <div className="flex items-center gap-8 bg-white/60 backdrop-blur-3xl px-10 py-4 rounded-[2.5rem] border border-white/50 shadow-xl pointer-events-auto">
                             <div className="flex items-center gap-4">
-                                <div className="flex items-center gap-2 px-3 py-1 bg-emerald-50 rounded-full border border-emerald-100">
-                                    <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.6)]" />
-                                    <span className="text-[8px] font-black text-emerald-600 uppercase tracking-widest">En Vivo</span>
+                                <div className="flex items-center gap-2 px-3 py-1 bg-emerald-50 rounded-full border border-emerald-100 animate-pulse">
+                                    <div className="w-2 h-2 bg-emerald-500 rounded-full shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
+                                    <span className="text-[9px] font-black text-emerald-600 uppercase tracking-widest">En Vivo</span>
                                 </div>
-                                <h1 className="text-3xl font-[1000] uppercase tracking-[-0.05em] text-slate-900 leading-none">
+                                <h1 className="text-2xl font-black text-slate-900 uppercase tracking-tighter leading-none">
                                     Centro de Despacho
                                 </h1>
                             </div>
 
-                            {/* BENTO STATS INTEGRATED */}
-                            <div className="flex items-center gap-6 pl-6 border-l border-slate-200">
-                                <div className="text-center">
-                                    <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest mb-0.5 leading-none">Barrios</p>
-                                    <p className="text-xl font-black text-slate-800 tracking-tighter leading-none">{Object.keys(neighborhoods).length}</p>
+                            <div className="flex items-center gap-8 pl-8 border-l border-slate-200/50">
+                                <div className="flex flex-col">
+                                    <span className="text-[9px] font-black text-slate-400 uppercase tracking-[0.2em] mb-1 leading-none">Barrios</span>
+                                    <span className="text-2xl font-black text-slate-900 tracking-tighter leading-none tabular-nums">{Object.keys(neighborhoods).length}</span>
                                 </div>
-                                <div className="text-center">
-                                    <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest mb-0.5 leading-none">Tickets</p>
-                                    <p className="text-xl font-black text-slate-800 tracking-tighter leading-none">{filteredTickets.length}</p>
+                                <div className="flex flex-col">
+                                    <span className="text-[9px] font-black text-slate-400 uppercase tracking-[0.2em] mb-1 leading-none">Tickets</span>
+                                    <span className="text-2xl font-black text-slate-900 tracking-tighter leading-none tabular-nums">{filteredTickets.length}</span>
                                 </div>
                             </div>
                         </div>
 
                         {/* SELECTOR DE VISTA (TABS) */}
-                        <div className="flex gap-2">
-                            <div className="bg-slate-100/50 backdrop-blur-xl p-1 rounded-2xl flex gap-1 pointer-events-auto border border-slate-200">
+                        <div className="flex items-center gap-3">
+                            <div className="bg-white/50 backdrop-blur-2xl p-1 rounded-[1.5rem] flex gap-1 pointer-events-auto border border-white/40 shadow-lg">
                                 <button
                                     onClick={() => setActiveView('dispatch')}
                                     className={clsx(
-                                        "px-6 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all",
-                                        activeView === 'dispatch' ? "bg-white text-primary shadow-sm" : "text-slate-400 hover:text-slate-600"
+                                        "px-6 py-2.5 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all",
+                                        activeView === 'dispatch' ? "bg-white text-primary shadow-md border border-slate-100" : "text-slate-400 hover:text-slate-600"
                                     )}
                                 >
-                                    Mapa de Despacho
+                                    Mapa
                                 </button>
                                 <button
                                     onClick={() => setShowHeatmap(!showHeatmap)}
                                     className={clsx(
-                                        "px-4 py-2 rounded-xl text-[8px] font-black uppercase tracking-widest transition-all flex items-center gap-2",
-                                        showHeatmap ? "bg-red-500 text-white shadow-lg" : "bg-white/50 text-slate-500 hover:text-red-500"
+                                        "px-5 py-2.5 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-2.5",
+                                        showHeatmap ? "bg-red-500 text-white shadow-lg shadow-red-200" : "bg-white/30 text-slate-500 hover:text-red-500 hover:bg-white/60"
                                     )}
                                 >
-                                    <div className={clsx("w-2 h-2 rounded-full", showHeatmap ? "bg-white animate-pulse" : "bg-red-500")} />
-                                    Mapa de Calor
+                                    <div className={clsx("w-1.5 h-1.5 rounded-full", showHeatmap ? "bg-white animate-pulse shadow-[0_0_6px_rgba(255,255,255,0.8)]" : "bg-red-500")} />
+                                    Calor
                                 </button>
                                 <button
                                     onClick={() => setActiveView('timeline')}
                                     className={clsx(
-                                        "px-6 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all",
-                                        activeView === 'timeline' ? "bg-white text-primary shadow-sm" : "text-slate-400 hover:text-slate-600"
+                                        "px-6 py-2.5 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all",
+                                        activeView === 'timeline' ? "bg-white text-primary shadow-md border border-slate-100" : "text-slate-400 hover:text-slate-600"
                                     )}
                                 >
-                                    Jornada Operativa
+                                    Jornada
                                 </button>
                             </div>
 
@@ -842,10 +842,10 @@ export function OperationsDispatch() {
                             <div className="flex flex-col gap-4 h-full overflow-hidden">
 
                                 {/* HEADER DE ASIGNACIÓN COMPACTO */}
-                                <div className="bg-slate-900 px-6 py-4 rounded-[2rem] border border-white/10 shadow-2xl flex items-center justify-between pointer-events-auto">
+                                <div className="bg-slate-900/90 backdrop-blur-3xl px-4 py-3 rounded-2xl border border-white/10 shadow-2xl flex items-center justify-between pointer-events-auto">
                                     <div className="flex flex-col">
-                                        <h2 className="text-sm font-black text-white uppercase tracking-tighter leading-none">Asignación</h2>
-                                        <span className="text-[8px] font-bold text-white/40 uppercase tracking-widest mt-1">Hoy</span>
+                                        <h2 className="text-[10px] font-black text-white uppercase tracking-tighter leading-none">Asignación</h2>
+                                        <span className="text-[8px] font-bold text-white/30 uppercase tracking-widest mt-1">Hoy</span>
                                     </div>
                                     <div className="flex items-center gap-2">
                                         <button
@@ -857,7 +857,7 @@ export function OperationsDispatch() {
                                                 }));
                                                 alert('Borrador guardado localmente');
                                             }}
-                                            className="px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all bg-slate-800 text-primary hover:bg-slate-700 border border-primary/20"
+                                            className="px-3 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all bg-white/5 text-slate-400 hover:bg-white/10 hover:text-white border border-white/5"
                                         >
                                             Borrador
                                         </button>
@@ -865,15 +865,15 @@ export function OperationsDispatch() {
                                             onClick={handlePublish}
                                             disabled={loading || Object.keys(assignedRoutes).length === 0}
                                             className={clsx(
-                                                "px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-2",
+                                                "px-4 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all flex items-center gap-2",
                                                 loading || Object.keys(assignedRoutes).length === 0
                                                     ? "bg-slate-800 text-slate-500 cursor-not-allowed border border-white/5"
-                                                    : "bg-primary text-white shadow-lg shadow-primary/20 hover:scale-105 active:scale-95 border border-primary/20"
+                                                    : "bg-primary text-white shadow-lg shadow-primary/25 hover:scale-105 active:scale-95 border border-primary/20"
                                             )}
                                         >
-                                            {loading ? <Loader2 className="animate-spin" size={12} /> : (
+                                            {loading ? <Loader2 className="animate-spin" size={10} /> : (
                                                 <>
-                                                    <CloudUpload size={12} />
+                                                    <CloudUpload size={10} />
                                                     <span>Publicar</span>
                                                 </>
                                             )}
