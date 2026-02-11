@@ -906,8 +906,10 @@ export function OperationsDispatch() {
                                                                 {...provided.droppableProps}
                                                                 ref={provided.innerRef}
                                                                 className={clsx(
-                                                                    "mt-1.5 min-h-[40px] transition-all duration-300 rounded-xl flex flex-col gap-1.5",
-                                                                    snapshot.isDraggingOver ? "bg-primary/5 border border-primary/20 shadow-inner p-2" : "bg-transparent px-1 pb-2"
+                                                                    "mt-1.5 min-h-[44px] transition-all duration-300 rounded-xl flex flex-col gap-1.5",
+                                                                    snapshot.isDraggingOver
+                                                                        ? "bg-primary/10 border-2 border-primary/40 shadow-[inset_0_2px_4px_rgba(var(--primary-rgb),0.1)] p-2"
+                                                                        : "bg-slate-100/40 border border-slate-200/60 px-1 pb-2"
                                                                 )}
                                                             >
                                                                 {(assignedRoutes[tech.id] || []).map((ticket, index) => (
@@ -950,10 +952,10 @@ export function OperationsDispatch() {
                                                                 ))}
                                                                 {provided.placeholder}
                                                                 {(assignedRoutes[tech.id] || []).length === 0 && !snapshot.isDraggingOver && (
-                                                                    <div className="py-4 text-center border-2 border-dashed border-slate-100 rounded-xl group-hover:border-primary/20 transition-colors">
-                                                                        <div className="flex flex-col items-center gap-1">
-                                                                            <CloudDownload size={10} className="text-slate-200" />
-                                                                            <span className="text-[8px] font-bold text-slate-300 uppercase tracking-widest">Soltar</span>
+                                                                    <div className="py-5 text-center border-2 border-dashed border-slate-200/80 rounded-xl group-hover:border-primary/30 transition-all bg-white/20">
+                                                                        <div className="flex flex-col items-center gap-1.5 opacity-60 group-hover:opacity-100 transition-opacity">
+                                                                            <CloudDownload size={12} className="text-slate-400 group-hover:text-primary transition-colors" />
+                                                                            <span className="text-[8px] font-black text-slate-400 group-hover:text-primary uppercase tracking-[0.15em]">Soltar</span>
                                                                         </div>
                                                                     </div>
                                                                 )}
