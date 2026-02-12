@@ -79,6 +79,11 @@ interface DispatchTicket {
     fecha_inicio?: string;
     fecha_fin?: string;
     estado?: string;
+    isPublished?: boolean;
+    servicio_completo?: any;
+    servicio?: any;
+    nombre_tecnico?: string;
+    tecnico_id?: string | number;
 }
 
 export function OperationsDispatch() {
@@ -207,16 +212,49 @@ export function OperationsDispatch() {
         });
     }, [getLocalToday]);
 
-    // Carga de Borrador de Rutas
     useEffect(() => {
         const stored = localStorage.getItem('dispatch_draft_schedule_v1');
+        let draftRoutes: Record<string, DispatchTicket[]> = {};
         if (stored) {
             try {
                 const { date, routes } = JSON.parse(stored);
-                if (date === getLocalToday()) setAssignedRoutes(routes);
+                if (date === getLocalToday()) draftRoutes = routes;
             } catch (e) { }
         }
-    }, [getLocalToday]);
+
+        // Cargar asignaciones reales desde el VPS para sincronizar el estado
+        if (technicians.length > 0) {
+            WorkflowService.getTodayAssignments().then((realAssignments: Record<string, any[]>) => {
+                setAssignedRoutes(prev => {
+                    const next: Record<string, DispatchTicket[]> = { ...prev, ...draftRoutes };
+                    // Inicializar con técnicos vacíos si no están
+                    technicians.forEach(tech => {
+                        if (!next[tech.id]) next[tech.id] = [];
+                    });
+
+                    // Mezclar asignaciones reales
+                    Object.entries(realAssignments).forEach(([techId, tickets]) => {
+                        if (next[techId]) {
+                            const existingIds = new Set(next[techId].map(t => String(t.id)));
+                            const newTickets = (tickets as any[]).map(t => ({ ...t, isPublished: true }));
+
+                            newTickets.forEach(t => {
+                                if (!existingIds.has(String(t.id))) {
+                                    next[techId].push(t);
+                                } else {
+                                    // Si ya existe en el borrador, marcarlo como publicado
+                                    next[techId] = next[techId].map(et =>
+                                        String(et.id) === String(t.id) ? { ...et, isPublished: true } : et
+                                    );
+                                }
+                            });
+                        }
+                    });
+                    return next;
+                });
+            });
+        }
+    }, [technicians.length]);
 
     // Procesamiento de Tickets (Abiertos y En Progreso para el Pool)
     useEffect(() => {
@@ -226,7 +264,7 @@ export function OperationsDispatch() {
         }
     }, [rawTickets, inProgressTickets, techList]);
 
-    const processTickets = async (allTickets: any[]) => {
+    const processTickets = async (allTickets: DispatchTicket[]) => {
         setTickets(allTickets.map(t => ({ ...t, barrio: t.barrio || 'Cargando...', score: 0 })));
         setLoading(false);
         try {
@@ -249,9 +287,9 @@ export function OperationsDispatch() {
 
             // Sincronizar assignedRoutes con datos frescos de WispHub (Filtro Anti-Fantasmas)
             // Si un ticket en las rutas ya no viene en los datos de WispHub (porque se cerró), lo quitamos.
-            const allValidTicketsMap = new Map(enriched.map(t => [String(t.id), t]));
+            const allValidTicketsMap = new Map<string, DispatchTicket>(enriched.map(t => [String(t.id), t]));
             setAssignedRoutes(prev => {
-                const next = { ...prev };
+                const next: Record<string, DispatchTicket[]> = { ...prev };
                 Object.keys(next).forEach(techId => {
                     next[techId] = (next[techId] || [])
                         .map(t => allValidTicketsMap.get(String(t.id)) || t) // Refrescar datos por si cambió algo
@@ -394,6 +432,24 @@ export function OperationsDispatch() {
 
         if (!itemToMove) return;
 
+        // --- LÓGICA DE REASIGNACIÓN INTELIGENTE ---
+        // Si el ticket ya estaba publicado, reasignar inmediatamente en el VPS/WispHub
+        if (itemToMove.isPublished && destination.droppableId !== 'unassigned') {
+            const destTech = technicians.find(t => t.id === destination.droppableId);
+            if (confirm(`¿Reasignar este ticket a ${destTech?.full_name}? El cambio será inmediato.`)) {
+                WorkflowService.reassignPublishedTicket(String(itemToMove.id), destination.droppableId)
+                    .then(success => {
+                        if (success) {
+                            mutateTickets(); // Refrescar datos
+                        } else {
+                            alert('Error al reasignar en el servidor. El cambio solo será visual.');
+                        }
+                    });
+            } else {
+                return; // Cancelar movimiento
+            }
+        }
+
         // Remover de origen e insertar en destino
         if (source.droppableId === 'unassigned') {
             setTickets(prev => prev.filter(t => t.id !== draggableId));
@@ -420,6 +476,7 @@ export function OperationsDispatch() {
                 const destList = Array.from(newRoutes[destination.droppableId] || []);
 
                 sourceList.splice(source.index, 1);
+                // Si viene de una lista publicada, mantenemos la marca en el destino si se mueve entre técnicos
                 destList.splice(destination.index, 0, itemToMove);
 
                 newRoutes[source.droppableId] = sourceList;
@@ -976,7 +1033,12 @@ export function OperationsDispatch() {
                                                                                             {index + 1}
                                                                                         </div>
                                                                                         <div className="min-w-0 flex-1">
-                                                                                            <h4 className="text-[10px] font-bold text-slate-700 tracking-tight group-hover:text-primary transition-colors truncate leading-tight">{ticket.nombre_cliente}</h4>
+                                                                                            <h4 className="text-[10px] font-bold text-slate-700 tracking-tight group-hover:text-primary transition-colors truncate leading-tight flex items-center gap-1.5">
+                                                                                                {ticket.nombre_cliente}
+                                                                                                {ticket.isPublished && (
+                                                                                                    <span className="shrink-0 px-1 py-0.5 bg-emerald-500 text-white text-[6px] font-black uppercase rounded shadow-sm">Hoy</span>
+                                                                                                )}
+                                                                                            </h4>
                                                                                             <div className="flex items-center gap-1">
                                                                                                 <span className="text-[8px] font-black text-primary uppercase">#{ticket.id}</span>
                                                                                                 <span className="text-[8px] font-medium text-slate-300">•</span>

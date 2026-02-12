@@ -142,6 +142,94 @@ export const WorkflowService = {
         return true;
     },
 
+    /**
+     * Reasigna un ticket que ya está publicado buscando su workitem activo.
+     */
+    async reassignPublishedTicket(ticketId: string, newParticipantId: string) {
+        try {
+            // 1. Encontrar el workitem activo para este ticket (reference_id)
+            const { data: item, error } = await supabase
+                .from('workflow_workitems')
+                .select(`
+                    id, 
+                    activity_id,
+                    workflow_activities!inner(
+                        id,
+                        workflow_processes!inner(id, reference_id)
+                    )
+                `)
+                .eq('workflow_activities.workflow_processes.reference_id', String(ticketId))
+                .eq('status', 'PE')
+                .order('created_at', { ascending: false })
+                .maybeSingle();
+
+            if (error || !item) {
+                console.error('[WorkflowService] No se encontró workitem activo para reasignar:', ticketId, error);
+
+                // FALLBACK: Si no hay workitem PE, intentamos ver si existe el proceso y crear uno nuevo para el técnico
+                const { data: process } = await supabase
+                    .from('workflow_processes')
+                    .select('id')
+                    .eq('reference_id', String(ticketId))
+                    .maybeSingle();
+
+                if (process) {
+                    console.log('[WorkflowService] Proceso encontrado, creando nuevo paso de gestión para reasignación.');
+                    const result = await this.createStep(process.id, 'Gestión de Ticket', newParticipantId, 'U');
+                    if (result) {
+                        await this.changeWispHubTechnician(ticketId, newParticipantId);
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            // 2. Usar la lógica de reasignación existente
+            const { data: { user } } = await supabase.auth.getUser();
+            return await this.reassignWorkItem(item.id, newParticipantId, user?.id || 'system');
+        } catch (e) {
+            console.error('[WorkflowService] Error en reassignPublishedTicket:', e);
+            return false;
+        }
+    },
+
+    /**
+     * Obtiene los tickets ya asignados hoy para poblar la vista de despacho.
+     */
+    async getTodayAssignments() {
+        try {
+            const today = new Date().toISOString().split('T')[0];
+            const { data, error } = await supabase
+                .from('workflow_workitems')
+                .select(`
+                    participant_id,
+                    workflow_activities!inner(
+                        workflow_processes!inner(reference_id, metadata, status)
+                    )
+                `)
+                .eq('status', 'PE')
+                .gte('created_at', today);
+
+            if (error) throw error;
+
+            const assignments: Record<string, any[]> = {};
+            data.forEach(item => {
+                const techId = item.participant_id;
+                const ticket = (item.workflow_activities as any).workflow_processes.metadata;
+                // Asegurarnos que el ID coincida con el reference_id por si la metadata está vieja
+                ticket.id = (item.workflow_activities as any).workflow_processes.reference_id;
+
+                if (!assignments[techId]) assignments[techId] = [];
+                assignments[techId].push(ticket);
+            });
+
+            return assignments;
+        } catch (e) {
+            console.error('[WorkflowService] Error obteniendo asignaciones de hoy:', e);
+            return {};
+        }
+    },
+
     async getPlatformUsers(): Promise<PlatformUser[]> {
         try {
             console.log('[getPlatformUsers] 🔍 Iniciando carga de perfiles...');
