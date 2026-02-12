@@ -119,19 +119,21 @@ export function OperationsDispatch() {
     const mapRef = useRef<L.Map | null>(null);
 
     // SWR HOOKS
-    const { data: techList } = useSWR('platform-users', () => WorkflowService.getPlatformUsers());
-    const { data: rawTickets, mutate: mutateTickets, error: ticketsError } = useSWR('wisphub-operational-tickets',
+    const { data: techList, isValidating: isSyncingTechs } = useSWR('platform-users', () => WorkflowService.getPlatformUsers());
+    const { data: rawTickets, mutate: mutateTickets, error: ticketsError, isValidating: isSyncingTickets } = useSWR('wisphub-operational-tickets',
         () => WisphubService.getAllTickets({ status: '1,5' }), // Incluimos Rezagados (5)
         { refreshInterval: 60000, revalidateOnFocus: true }
     );
-    const { data: inProgressTickets } = useSWR('wisphub-in-progress-tickets',
+    const { data: inProgressTickets, isValidating: isSyncingInProgress } = useSWR('wisphub-in-progress-tickets',
         () => WisphubService.getAllTickets({ status: '2' }),
         { refreshInterval: 60000, revalidateOnFocus: true }
     );
-    const { data: completedTicketsRaw } = useSWR('wisphub-completed-tickets',
+    const { data: completedTicketsRaw, isValidating: isSyncingCompleted } = useSWR('wisphub-completed-tickets',
         () => WisphubService.getAllTickets({ status: '3,4' }),
         { refreshInterval: 60000, revalidateOnFocus: true }
     );
+
+    const isGlobalSyncing = isSyncingTickets || isSyncingInProgress || isSyncingCompleted || isSyncingTechs;
 
     const technicians = useMemo(() => {
         if (!techList) return [];
@@ -531,11 +533,13 @@ export function OperationsDispatch() {
     };
     useEffect(() => { if (selectedTicket && !selectedTicket.creado_por) loadTicketDetail(selectedTicket.id); }, [selectedTicket?.id]);
 
-    if ((loading || !rawTickets || !techList) && !ticketsError) {
+    // SOLO BLOQUEAR SI NO TENEMOS TÉCNICOS (Estructura mínima necesaria)
+    // El resto de los datos se cargan en segundo plano
+    if (!techList && !ticketsError) {
         return (
             <div className="flex flex-col items-center justify-center min-h-[400px] gap-4">
                 <Loader2 className="w-12 h-12 animate-spin text-primary" />
-                <p className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Sincronizando Sistema...</p>
+                <p className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Iniciando Despacho...</p>
             </div>
         );
     }
@@ -780,499 +784,526 @@ export function OperationsDispatch() {
                     {/* CAPA 1.2: CONTENIDO DE DESPACHO (LATERALES) */}
                     {activeView === 'dispatch' && (
                         <div className="grid grid-cols-[280px_1fr_300px] gap-4 w-full h-full">
-                            {/* Columna Izquierda: Control & Pool */}
-                            <div className="w-[320px] flex flex-col gap-3 h-full overflow-hidden pointer-events-none">
-                                {/* Widget: Filtros */}
-                                <div className="bg-white/80 backdrop-blur-2xl p-4 rounded-3xl border border-white/50 shadow-xl pointer-events-auto animate-in slide-in-from-left-8 duration-700">
-                                    <div className="flex items-center justify-between mb-3 px-1">
-                                        <div className="flex items-center gap-2">
-                                            <div className="w-1.5 h-5 bg-primary rounded-full"></div>
-                                            <h2 className="text-[10px] font-black uppercase tracking-widest text-slate-800">Filtros</h2>
-                                        </div>
-                                        <div className="bg-slate-100 px-2 py-0.5 rounded-full text-[10px] font-black text-slate-500 tabular-nums">
-                                            {filteredTickets.length} / {tickets.length}
+                            {/* CAPA 1: CABECERA FLOTANTE Y PANEL LATERAL */}
+                            <div
+                                className="absolute top-6 left-6 right-6 z-10 flex flex-col pointer-events-none"
+                            >
+                                <div className="flex justify-between items-start w-full">
+                                    {/* Grupo Izquierdo: Titulo e Indicador de Sincronización */}
+                                    <div className="flex flex-col gap-2 pointer-events-auto">
+                                        <div className="flex items-center gap-4 bg-slate-900/90 backdrop-blur-md p-4 rounded-3xl border border-white/10 shadow-2xl">
+                                            <div className="w-12 h-12 bg-primary/20 rounded-2xl flex items-center justify-center border border-primary/30">
+                                                <Truck className="w-6 h-6 text-primary" />
+                                            </div>
+                                            <div className="flex flex-col">
+                                                <h2 className="text-lg font-black text-white leading-none">Despacho Inteligente</h2>
+                                                <div className="flex items-center gap-2 mt-1">
+                                                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                                                        Logística Operativa
+                                                    </p>
+                                                    {isGlobalSyncing && (
+                                                        <div className="flex items-center gap-1.5 px-2 py-0.5 bg-primary/10 rounded-full border border-primary/20 animate-pulse">
+                                                            <Loader2 className="w-2.5 h-2.5 animate-spin text-primary" />
+                                                            <span className="text-[8px] font-black text-primary uppercase">Sincronizando</span>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </div>
                                         </div>
                                     </div>
+                                    {/* Columna Izquierda: Control & Pool */}
+                                    <div className="w-[320px] flex flex-col gap-3 h-full overflow-hidden pointer-events-none">
+                                        {/* Widget: Filtros */}
+                                        <div className="bg-white/80 backdrop-blur-2xl p-4 rounded-3xl border border-white/50 shadow-xl pointer-events-auto animate-in slide-in-from-left-8 duration-700">
+                                            <div className="flex items-center justify-between mb-3 px-1">
+                                                <div className="flex items-center gap-2">
+                                                    <div className="w-1.5 h-5 bg-primary rounded-full"></div>
+                                                    <h2 className="text-[10px] font-black uppercase tracking-widest text-slate-800">Filtros</h2>
+                                                </div>
+                                                <div className="bg-slate-100 px-2 py-0.5 rounded-full text-[10px] font-black text-slate-500 tabular-nums">
+                                                    {filteredTickets.length} / {tickets.length}
+                                                </div>
+                                            </div>
 
-                                    <div className="space-y-3">
-                                        <div>
-                                            <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest ml-1 mb-1 block">Técnico Asignado</label>
-                                            <div className="relative">
-                                                <select
-                                                    value={filterTechId}
-                                                    onChange={(e) => setFilterTechId(e.target.value)}
-                                                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-[10px] font-bold text-slate-700 outline-none focus:ring-1 focus:ring-primary/20 transition-all appearance-none pr-8"
-                                                >
-                                                    <option value="all">Todos los Técnicos</option>
-                                                    {technicians.map(t => (
-                                                        <option key={t.id} value={t.id}>{t.full_name}</option>
-                                                    ))}
-                                                </select>
-                                                <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" size={12} />
+                                            <div className="space-y-3">
+                                                <div>
+                                                    <label className="text-[9px] font-bold text-slate-400 uppercase tracking-widest ml-1 mb-1 block">Técnico Asignado</label>
+                                                    <div className="relative">
+                                                        <select
+                                                            value={filterTechId}
+                                                            onChange={(e) => setFilterTechId(e.target.value)}
+                                                            className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-[10px] font-bold text-slate-700 outline-none focus:ring-1 focus:ring-primary/20 transition-all appearance-none pr-8"
+                                                        >
+                                                            <option value="all">Todos los Técnicos</option>
+                                                            {technicians.map(t => (
+                                                                <option key={t.id} value={t.id}>{t.full_name}</option>
+                                                            ))}
+                                                        </select>
+                                                        <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" size={12} />
+                                                    </div>
+                                                </div>
+
+                                                <div className="flex items-center justify-between p-2.5 bg-slate-50 rounded-xl border border-slate-200/50">
+                                                    <label className="flex items-center gap-2 cursor-pointer group">
+                                                        <div className="relative">
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={showInstallations}
+                                                                onChange={(e) => setShowInstallations(e.target.checked)}
+                                                                className="sr-only peer"
+                                                            />
+                                                            <div className="w-8 h-4 bg-slate-200 rounded-full peer peer-checked:bg-primary transition-all duration-300"></div>
+                                                            <div className="absolute left-0.5 top-0.5 w-3 h-3 bg-white rounded-full peer-checked:translate-x-4 transition-all duration-300 shadow-sm"></div>
+                                                        </div>
+                                                        <span className="text-[9px] font-black uppercase text-slate-600 group-hover:text-primary transition-colors tracking-tight">Ver Instalaciones</span>
+                                                    </label>
+                                                </div>
                                             </div>
                                         </div>
 
-                                        <div className="flex items-center justify-between p-2.5 bg-slate-50 rounded-xl border border-slate-200/50">
-                                            <label className="flex items-center gap-2 cursor-pointer group">
+                                        {/* Widget: Pool de Tickets Pendientes */}
+                                        <div className="flex-1 flex flex-col min-h-0 bg-white/70 backdrop-blur-3xl rounded-[1.5rem] border border-white/50 shadow-2xl overflow-hidden pointer-events-auto animate-in slide-in-from-left-8 duration-700 delay-150">
+                                            <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between bg-white/50">
+                                                <div className="flex items-center gap-2">
+                                                    <Truck size={12} className="text-primary" />
+                                                    <h2 className="text-[10px] font-black uppercase tracking-tight text-slate-800">Pool Pendientes</h2>
+                                                </div>
+                                            </div>
+
+                                            <div className="px-3 py-2.5">
                                                 <div className="relative">
+                                                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
                                                     <input
-                                                        type="checkbox"
-                                                        checked={showInstallations}
-                                                        onChange={(e) => setShowInstallations(e.target.checked)}
-                                                        className="sr-only peer"
+                                                        type="text"
+                                                        placeholder="Buscar..."
+                                                        value={searchQuery}
+                                                        onChange={(e) => setSearchQuery(e.target.value)}
+                                                        className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-3 py-2 text-[10px] font-bold text-slate-700 outline-none focus:bg-white transition-all"
                                                     />
-                                                    <div className="w-8 h-4 bg-slate-200 rounded-full peer peer-checked:bg-primary transition-all duration-300"></div>
-                                                    <div className="absolute left-0.5 top-0.5 w-3 h-3 bg-white rounded-full peer-checked:translate-x-4 transition-all duration-300 shadow-sm"></div>
                                                 </div>
-                                                <span className="text-[9px] font-black uppercase text-slate-600 group-hover:text-primary transition-colors tracking-tight">Ver Instalaciones</span>
-                                            </label>
-                                        </div>
-                                    </div>
-                                </div>
+                                            </div>
 
-                                {/* Widget: Pool de Tickets Pendientes */}
-                                <div className="flex-1 flex flex-col min-h-0 bg-white/70 backdrop-blur-3xl rounded-[1.5rem] border border-white/50 shadow-2xl overflow-hidden pointer-events-auto animate-in slide-in-from-left-8 duration-700 delay-150">
-                                    <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between bg-white/50">
-                                        <div className="flex items-center gap-2">
-                                            <Truck size={12} className="text-primary" />
-                                            <h2 className="text-[10px] font-black uppercase tracking-tight text-slate-800">Pool Pendientes</h2>
-                                        </div>
-                                    </div>
-
-                                    <div className="px-3 py-2.5">
-                                        <div className="relative">
-                                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
-                                            <input
-                                                type="text"
-                                                placeholder="Buscar..."
-                                                value={searchQuery}
-                                                onChange={(e) => setSearchQuery(e.target.value)}
-                                                className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-3 py-2 text-[10px] font-bold text-slate-700 outline-none focus:bg-white transition-all"
-                                            />
-                                        </div>
-                                    </div>
-
-                                    <div className="flex-1 overflow-y-auto custom-scrollbar px-3 pb-4">
-                                        <Droppable droppableId="unassigned">
-                                            {(provided, snapshot) => (
-                                                <div
-                                                    {...provided.droppableProps}
-                                                    ref={provided.innerRef}
-                                                    className={clsx(
-                                                        "min-h-[200px] transition-all duration-300 rounded-xl",
-                                                        snapshot.isDraggingOver ? "bg-primary/5 ring-1 ring-primary/20 ring-dashed" : "bg-transparent"
-                                                    )}
-                                                >
-                                                    {filteredTickets.map((ticket, index) => (
-                                                        <Draggable key={ticket.id} draggableId={ticket.id} index={index}>
-                                                            {(provided, snapshot) => {
-                                                                const content = (
-                                                                    <div
-                                                                        ref={provided.innerRef}
-                                                                        {...provided.draggableProps}
-                                                                        {...provided.dragHandleProps}
-                                                                        className={clsx(
-                                                                            "group p-2.5 mb-1.5 rounded-xl transition-all border shadow-sm",
-                                                                            snapshot.isDragging
-                                                                                ? "bg-white shadow-xl border-primary ring-2 ring-primary/10 rotate-1 z-[9999] opacity-100 scale-105"
-                                                                                : "bg-white border-slate-100 hover:border-primary/30 hover:shadow-md"
-                                                                        )}
-                                                                        onClick={() => setSelectedTicket(ticket)}
-                                                                    >
-                                                                        <div className="flex items-center justify-between mb-1">
-                                                                            <div className="flex items-center gap-1.5 flex-wrap">
-                                                                                <div className="px-1.5 py-0.5 bg-slate-100 rounded text-[8px] font-black text-slate-500 uppercase tracking-tighter">#{ticket.id}</div>
-                                                                                <div className={clsx(
-                                                                                    "px-1.5 py-0.5 rounded text-[8px] font-black uppercase tracking-tighter",
-                                                                                    ticket.horas_abierto > 48 ? "bg-red-100 text-red-600" :
-                                                                                        ticket.horas_abierto > 24 ? "bg-amber-100 text-amber-600" :
-                                                                                            "bg-emerald-100 text-emerald-600"
-                                                                                )}>
-                                                                                    {ticket.horas_abierto >= 24
-                                                                                        ? `${Math.floor(ticket.horas_abierto / 24)}d ${ticket.horas_abierto % 24}h`
-                                                                                        : `${ticket.horas_abierto}h`}
-                                                                                </div>
-                                                                            </div>
-                                                                            {ticket.id_prioridad >= 4 && (
-                                                                                <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse shadow-[0_0_8px_rgba(239,68,68,0.5)]"></div>
-                                                                            )}
-                                                                        </div>
-                                                                        <h3 className="text-[11px] font-black text-slate-900 group-hover:text-primary transition-colors leading-[1.1] mb-1 line-clamp-2">{ticket.nombre_cliente}</h3>
-                                                                        <div className="flex items-center gap-1 text-slate-400">
-                                                                            <MapPin size={8} className="text-primary/60 shrink-0" />
-                                                                            <span className="text-[9px] font-bold uppercase tracking-tight truncate">{ticket.barrio}</span>
-                                                                        </div>
-                                                                        <div className="mt-1.5 pt-1 border-t border-slate-50 flex justify-between items-center gap-2">
-                                                                            <span className="text-[8px] font-black text-slate-400 uppercase tracking-widest truncate flex-1">{ticket.asunto}</span>
-                                                                        </div>
-                                                                    </div>
-                                                                );
-
-                                                                if (snapshot.isDragging) {
-                                                                    return <Portal>{content}</Portal>;
-                                                                }
-                                                                return content;
-                                                            }}
-                                                        </Draggable>
-                                                    ))}
-                                                    {provided.placeholder}
-                                                </div>
-                                            )}
-                                        </Droppable>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div className="relative min-w-0 h-full">
-                                {/* WIDGET: BADGE DE FILTRO MAPA (BOTTOM CENTER) */}
-                                {mapFilter && (
-                                    <div className="absolute bottom-6 left-1/2 -translate-x-1/2 bg-primary text-white px-8 py-4 rounded-full shadow-2xl flex items-center gap-4 pointer-events-auto animate-in slide-in-from-bottom-8 duration-500">
-                                        <MapPin size={16} className="animate-bounce" />
-                                        <span className="text-xs font-black uppercase tracking-widest">Barrio: {mapFilter}</span>
-                                        <button
-                                            onClick={() => setMapFilter(null)}
-                                            className="bg-white/20 hover:bg-white/40 p-1.5 rounded-full transition-colors"
-                                        >
-                                            <X size={16} />
-                                        </button>
-                                    </div>
-                                )}
-                            </div>
-
-                            {/* COLUMNA DERECHA: ASIGNACIÓN & TÉCNICOS */}
-                            <div className="flex flex-col gap-4 h-full overflow-hidden">
-
-                                {/* HEADER DE ASIGNACIÓN COMPACTO */}
-                                <div className="bg-slate-900/90 backdrop-blur-3xl px-4 py-3 rounded-2xl border border-white/10 shadow-2xl flex items-center justify-between pointer-events-auto">
-                                    <div className="flex flex-col">
-                                        <h2 className="text-[10px] font-black text-white uppercase tracking-tighter leading-none">Asignación</h2>
-                                        <span className="text-[8px] font-bold text-white/30 uppercase tracking-widest mt-1">Hoy</span>
-                                    </div>
-                                    <div className="flex items-center gap-2">
-                                        <button
-                                            onClick={() => {
-                                                const today = getLocalToday();
-                                                localStorage.setItem('dispatch_draft_schedule_v1', JSON.stringify({
-                                                    date: today,
-                                                    routes: assignedRoutes
-                                                }));
-                                                alert('Borrador guardado localmente');
-                                            }}
-                                            className="px-3 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all bg-white/5 text-slate-400 hover:bg-white/10 hover:text-white border border-white/5"
-                                        >
-                                            Borrador
-                                        </button>
-                                        <button
-                                            onClick={handlePublish}
-                                            disabled={loading || Object.keys(assignedRoutes).length === 0}
-                                            className={clsx(
-                                                "px-4 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all flex items-center gap-2",
-                                                loading || Object.keys(assignedRoutes).length === 0
-                                                    ? "bg-slate-800 text-slate-500 cursor-not-allowed border border-white/5"
-                                                    : "bg-primary text-white shadow-lg shadow-primary/25 hover:scale-105 active:scale-95 border border-primary/20"
-                                            )}
-                                        >
-                                            {loading ? <Loader2 className="animate-spin" size={10} /> : (
-                                                <>
-                                                    <CloudUpload size={10} />
-                                                    <span>Publicar</span>
-                                                </>
-                                            )}
-                                        </button>
-                                    </div>
-                                </div>
-
-                                {/* LISTA DE TÉCNICOS */}
-                                <div className="flex-1 bg-white/70 backdrop-blur-3xl p-5 rounded-[2.5rem] border border-white/50 shadow-[0_25px_50px_rgba(0,0,0,0.05)] overflow-hidden pointer-events-auto animate-in slide-in-from-right-8 duration-700 delay-200">
-                                    <div className="flex flex-col gap-5 h-full">
-                                        <div className="custom-scrollbar pr-2 flex-1 overflow-y-auto min-h-0 pl-1">
-                                            {technicians.map((tech) => (
-                                                <div key={tech.id} className="mb-6">
-                                                    <div className="flex items-center gap-2 px-2 py-1.5 hover:bg-slate-50/80 transition-colors group cursor-default">
-                                                        <div className="w-7 h-7 rounded-full bg-gradient-to-br from-primary/10 to-primary/5 flex items-center justify-center border border-primary/10">
-                                                            <User size={12} className="text-primary" />
-                                                        </div>
-                                                        <div className="flex-1 min-w-0">
-                                                            <h3 className="text-[11px] font-bold text-slate-800 tracking-tight truncate border-b border-transparent group-hover:border-primary/20 transition-all">{tech.full_name}</h3>
-                                                        </div>
-                                                        <div className="flex items-center gap-1.5 bg-slate-100 px-1.5 py-0.5 rounded-lg border border-slate-200/50">
-                                                            <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
-                                                            <span className="text-[9px] font-black text-slate-600">{(assignedRoutes[tech.id] || []).length}</span>
-                                                        </div>
-                                                    </div>
-
-                                                    <Droppable droppableId={tech.id}>
-                                                        {(provided, snapshot) => (
-                                                            <div
-                                                                {...provided.droppableProps}
-                                                                ref={provided.innerRef}
-                                                                className={clsx(
-                                                                    "mt-1.5 min-h-[44px] transition-all duration-300 rounded-xl flex flex-col gap-1.5",
-                                                                    snapshot.isDraggingOver
-                                                                        ? "bg-primary/10 border-2 border-primary/40 shadow-[inset_0_2px_4px_rgba(var(--primary-rgb),0.1)] p-2"
-                                                                        : "bg-slate-100/40 border border-slate-200/60 px-1 pb-2"
-                                                                )}
-                                                            >
-                                                                {(assignedRoutes[tech.id] || []).map((ticket, index) => (
-                                                                    <Draggable key={ticket.id} draggableId={ticket.id} index={index}>
-                                                                        {(provided, snapshot) => {
-                                                                            const content = (
-                                                                                <div
-                                                                                    ref={provided.innerRef}
-                                                                                    {...provided.draggableProps}
-                                                                                    {...provided.dragHandleProps}
-                                                                                    className={clsx(
-                                                                                        "group relative p-2 rounded-lg transition-all cursor-grab active:cursor-grabbing border",
-                                                                                        snapshot.isDragging
-                                                                                            ? "bg-white shadow-xl border-primary ring-2 ring-primary/20 scale-105 rotate-1 z-[9999] opacity-100"
-                                                                                            : "bg-white border-slate-100 hover:border-primary/20 shadow-sm"
-                                                                                    )}
-                                                                                >
-                                                                                    <div className="flex items-center gap-2">
-                                                                                        <div className="bg-slate-50 text-slate-400 text-[8px] font-black w-5 h-5 rounded flex items-center justify-center border border-slate-100">
-                                                                                            {index + 1}
-                                                                                        </div>
-                                                                                        <div className="min-w-0 flex-1">
-                                                                                            <h4 className="text-[10px] font-bold text-slate-700 tracking-tight group-hover:text-primary transition-colors truncate leading-tight flex items-center gap-1.5">
-                                                                                                {ticket.nombre_cliente}
-                                                                                                {ticket.isPublished && (
-                                                                                                    <span className="shrink-0 px-1 py-0.5 bg-emerald-500 text-white text-[6px] font-black uppercase rounded shadow-sm">Hoy</span>
-                                                                                                )}
-                                                                                            </h4>
-                                                                                            <div className="flex items-center gap-1">
-                                                                                                <span className="text-[8px] font-black text-primary uppercase">#{ticket.id}</span>
-                                                                                                <span className="text-[8px] font-medium text-slate-300">•</span>
-                                                                                                <span className="text-[8px] font-bold text-slate-400 uppercase truncate">{ticket.barrio}</span>
-                                                                                            </div>
+                                            <div className="flex-1 overflow-y-auto custom-scrollbar px-3 pb-4">
+                                                <Droppable droppableId="unassigned">
+                                                    {(provided, snapshot) => (
+                                                        <div
+                                                            {...provided.droppableProps}
+                                                            ref={provided.innerRef}
+                                                            className={clsx(
+                                                                "min-h-[200px] transition-all duration-300 rounded-xl",
+                                                                snapshot.isDraggingOver ? "bg-primary/5 ring-1 ring-primary/20 ring-dashed" : "bg-transparent"
+                                                            )}
+                                                        >
+                                                            {filteredTickets.map((ticket, index) => (
+                                                                <Draggable key={ticket.id} draggableId={ticket.id} index={index}>
+                                                                    {(provided, snapshot) => {
+                                                                        const content = (
+                                                                            <div
+                                                                                ref={provided.innerRef}
+                                                                                {...provided.draggableProps}
+                                                                                {...provided.dragHandleProps}
+                                                                                className={clsx(
+                                                                                    "group p-2.5 mb-1.5 rounded-xl transition-all border shadow-sm",
+                                                                                    snapshot.isDragging
+                                                                                        ? "bg-white shadow-xl border-primary ring-2 ring-primary/10 rotate-1 z-[9999] opacity-100 scale-105"
+                                                                                        : "bg-white border-slate-100 hover:border-primary/30 hover:shadow-md"
+                                                                                )}
+                                                                                onClick={() => setSelectedTicket(ticket)}
+                                                                            >
+                                                                                <div className="flex items-center justify-between mb-1">
+                                                                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                                                                        <div className="px-1.5 py-0.5 bg-slate-100 rounded text-[8px] font-black text-slate-500 uppercase tracking-tighter">#{ticket.id}</div>
+                                                                                        <div className={clsx(
+                                                                                            "px-1.5 py-0.5 rounded text-[8px] font-black uppercase tracking-tighter",
+                                                                                            ticket.horas_abierto > 48 ? "bg-red-100 text-red-600" :
+                                                                                                ticket.horas_abierto > 24 ? "bg-amber-100 text-amber-600" :
+                                                                                                    "bg-emerald-100 text-emerald-600"
+                                                                                        )}>
+                                                                                            {ticket.horas_abierto >= 24
+                                                                                                ? `${Math.floor(ticket.horas_abierto / 24)}d ${ticket.horas_abierto % 24}h`
+                                                                                                : `${ticket.horas_abierto}h`}
                                                                                         </div>
                                                                                     </div>
+                                                                                    {ticket.id_prioridad >= 4 && (
+                                                                                        <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse shadow-[0_0_8px_rgba(239,68,68,0.5)]"></div>
+                                                                                    )}
                                                                                 </div>
-                                                                            );
+                                                                                <h3 className="text-[11px] font-black text-slate-900 group-hover:text-primary transition-colors leading-[1.1] mb-1 line-clamp-2">{ticket.nombre_cliente}</h3>
+                                                                                <div className="flex items-center gap-1 text-slate-400">
+                                                                                    <MapPin size={8} className="text-primary/60 shrink-0" />
+                                                                                    <span className="text-[9px] font-bold uppercase tracking-tight truncate">{ticket.barrio}</span>
+                                                                                </div>
+                                                                                <div className="mt-1.5 pt-1 border-t border-slate-50 flex justify-between items-center gap-2">
+                                                                                    <span className="text-[8px] font-black text-slate-400 uppercase tracking-widest truncate flex-1">{ticket.asunto}</span>
+                                                                                </div>
+                                                                            </div>
+                                                                        );
 
-                                                                            if (snapshot.isDragging) {
-                                                                                return <Portal>{content}</Portal>;
-                                                                            }
-                                                                            return content;
-                                                                        }}
-                                                                    </Draggable>
-                                                                ))}
-                                                                {provided.placeholder}
-                                                                {(assignedRoutes[tech.id] || []).length === 0 && !snapshot.isDraggingOver && (
-                                                                    <div className="py-5 text-center border-2 border-dashed border-slate-200/80 rounded-xl group-hover:border-primary/30 transition-all bg-white/20">
-                                                                        <div className="flex flex-col items-center gap-1.5 opacity-60 group-hover:opacity-100 transition-opacity">
-                                                                            <CloudDownload size={12} className="text-slate-400 group-hover:text-primary transition-colors" />
-                                                                            <span className="text-[8px] font-black text-slate-400 group-hover:text-primary uppercase tracking-[0.15em]">Soltar</span>
-                                                                        </div>
+                                                                        if (snapshot.isDragging) {
+                                                                            return <Portal>{content}</Portal>;
+                                                                        }
+                                                                        return content;
+                                                                    }}
+                                                                </Draggable>
+                                                            ))}
+                                                            {provided.placeholder}
+                                                        </div>
+                                                    )}
+                                                </Droppable>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div className="relative min-w-0 h-full">
+                                        {/* WIDGET: BADGE DE FILTRO MAPA (BOTTOM CENTER) */}
+                                        {mapFilter && (
+                                            <div className="absolute bottom-6 left-1/2 -translate-x-1/2 bg-primary text-white px-8 py-4 rounded-full shadow-2xl flex items-center gap-4 pointer-events-auto animate-in slide-in-from-bottom-8 duration-500">
+                                                <MapPin size={16} className="animate-bounce" />
+                                                <span className="text-xs font-black uppercase tracking-widest">Barrio: {mapFilter}</span>
+                                                <button
+                                                    onClick={() => setMapFilter(null)}
+                                                    className="bg-white/20 hover:bg-white/40 p-1.5 rounded-full transition-colors"
+                                                >
+                                                    <X size={16} />
+                                                </button>
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    {/* COLUMNA DERECHA: ASIGNACIÓN & TÉCNICOS */}
+                                    <div className="flex flex-col gap-4 h-full overflow-hidden">
+
+                                        {/* HEADER DE ASIGNACIÓN COMPACTO */}
+                                        <div className="bg-slate-900/90 backdrop-blur-3xl px-4 py-3 rounded-2xl border border-white/10 shadow-2xl flex items-center justify-between pointer-events-auto">
+                                            <div className="flex flex-col">
+                                                <h2 className="text-[10px] font-black text-white uppercase tracking-tighter leading-none">Asignación</h2>
+                                                <span className="text-[8px] font-bold text-white/30 uppercase tracking-widest mt-1">Hoy</span>
+                                            </div>
+                                            <div className="flex items-center gap-2">
+                                                <button
+                                                    onClick={() => {
+                                                        const today = getLocalToday();
+                                                        localStorage.setItem('dispatch_draft_schedule_v1', JSON.stringify({
+                                                            date: today,
+                                                            routes: assignedRoutes
+                                                        }));
+                                                        alert('Borrador guardado localmente');
+                                                    }}
+                                                    className="px-3 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all bg-white/5 text-slate-400 hover:bg-white/10 hover:text-white border border-white/5"
+                                                >
+                                                    Borrador
+                                                </button>
+                                                <button
+                                                    onClick={handlePublish}
+                                                    disabled={loading || Object.keys(assignedRoutes).length === 0}
+                                                    className={clsx(
+                                                        "px-4 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all flex items-center gap-2",
+                                                        loading || Object.keys(assignedRoutes).length === 0
+                                                            ? "bg-slate-800 text-slate-500 cursor-not-allowed border border-white/5"
+                                                            : "bg-primary text-white shadow-lg shadow-primary/25 hover:scale-105 active:scale-95 border border-primary/20"
+                                                    )}
+                                                >
+                                                    {loading ? <Loader2 className="animate-spin" size={10} /> : (
+                                                        <>
+                                                            <CloudUpload size={10} />
+                                                            <span>Publicar</span>
+                                                        </>
+                                                    )}
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        {/* LISTA DE TÉCNICOS */}
+                                        <div className="flex-1 bg-white/70 backdrop-blur-3xl p-5 rounded-[2.5rem] border border-white/50 shadow-[0_25px_50px_rgba(0,0,0,0.05)] overflow-hidden pointer-events-auto animate-in slide-in-from-right-8 duration-700 delay-200">
+                                            <div className="flex flex-col gap-5 h-full">
+                                                <div className="custom-scrollbar pr-2 flex-1 overflow-y-auto min-h-0 pl-1">
+                                                    {technicians.map((tech) => (
+                                                        <div key={tech.id} className="mb-6">
+                                                            <div className="flex items-center gap-2 px-2 py-1.5 hover:bg-slate-50/80 transition-colors group cursor-default">
+                                                                <div className="w-7 h-7 rounded-full bg-gradient-to-br from-primary/10 to-primary/5 flex items-center justify-center border border-primary/10">
+                                                                    <User size={12} className="text-primary" />
+                                                                </div>
+                                                                <div className="flex-1 min-w-0">
+                                                                    <h3 className="text-[11px] font-bold text-slate-800 tracking-tight truncate border-b border-transparent group-hover:border-primary/20 transition-all">{tech.full_name}</h3>
+                                                                </div>
+                                                                <div className="flex items-center gap-1.5 bg-slate-100 px-1.5 py-0.5 rounded-lg border border-slate-200/50">
+                                                                    <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
+                                                                    <span className="text-[9px] font-black text-slate-600">{(assignedRoutes[tech.id] || []).length}</span>
+                                                                </div>
+                                                            </div>
+
+                                                            <Droppable droppableId={tech.id}>
+                                                                {(provided, snapshot) => (
+                                                                    <div
+                                                                        {...provided.droppableProps}
+                                                                        ref={provided.innerRef}
+                                                                        className={clsx(
+                                                                            "mt-1.5 min-h-[44px] transition-all duration-300 rounded-xl flex flex-col gap-1.5",
+                                                                            snapshot.isDraggingOver
+                                                                                ? "bg-primary/10 border-2 border-primary/40 shadow-[inset_0_2px_4px_rgba(var(--primary-rgb),0.1)] p-2"
+                                                                                : "bg-slate-100/40 border border-slate-200/60 px-1 pb-2"
+                                                                        )}
+                                                                    >
+                                                                        {(assignedRoutes[tech.id] || []).map((ticket, index) => (
+                                                                            <Draggable key={ticket.id} draggableId={ticket.id} index={index}>
+                                                                                {(provided, snapshot) => {
+                                                                                    const content = (
+                                                                                        <div
+                                                                                            ref={provided.innerRef}
+                                                                                            {...provided.draggableProps}
+                                                                                            {...provided.dragHandleProps}
+                                                                                            className={clsx(
+                                                                                                "group relative p-2 rounded-lg transition-all cursor-grab active:cursor-grabbing border",
+                                                                                                snapshot.isDragging
+                                                                                                    ? "bg-white shadow-xl border-primary ring-2 ring-primary/20 scale-105 rotate-1 z-[9999] opacity-100"
+                                                                                                    : "bg-white border-slate-100 hover:border-primary/20 shadow-sm"
+                                                                                            )}
+                                                                                        >
+                                                                                            <div className="flex items-center gap-2">
+                                                                                                <div className="bg-slate-50 text-slate-400 text-[8px] font-black w-5 h-5 rounded flex items-center justify-center border border-slate-100">
+                                                                                                    {index + 1}
+                                                                                                </div>
+                                                                                                <div className="min-w-0 flex-1">
+                                                                                                    <h4 className="text-[10px] font-bold text-slate-700 tracking-tight group-hover:text-primary transition-colors truncate leading-tight flex items-center gap-1.5">
+                                                                                                        {ticket.nombre_cliente}
+                                                                                                        {ticket.isPublished && (
+                                                                                                            <span className="shrink-0 px-1 py-0.5 bg-emerald-500 text-white text-[6px] font-black uppercase rounded shadow-sm">Hoy</span>
+                                                                                                        )}
+                                                                                                    </h4>
+                                                                                                    <div className="flex items-center gap-1">
+                                                                                                        <span className="text-[8px] font-black text-primary uppercase">#{ticket.id}</span>
+                                                                                                        <span className="text-[8px] font-medium text-slate-300">•</span>
+                                                                                                        <span className="text-[8px] font-bold text-slate-400 uppercase truncate">{ticket.barrio}</span>
+                                                                                                    </div>
+                                                                                                </div>
+                                                                                            </div>
+                                                                                        </div>
+                                                                                    );
+
+                                                                                    if (snapshot.isDragging) {
+                                                                                        return <Portal>{content}</Portal>;
+                                                                                    }
+                                                                                    return content;
+                                                                                }}
+                                                                            </Draggable>
+                                                                        ))}
+                                                                        {provided.placeholder}
+                                                                        {(assignedRoutes[tech.id] || []).length === 0 && !snapshot.isDraggingOver && (
+                                                                            <div className="py-5 text-center border-2 border-dashed border-slate-200/80 rounded-xl group-hover:border-primary/30 transition-all bg-white/20">
+                                                                                <div className="flex flex-col items-center gap-1.5 opacity-60 group-hover:opacity-100 transition-opacity">
+                                                                                    <CloudDownload size={12} className="text-slate-400 group-hover:text-primary transition-colors" />
+                                                                                    <span className="text-[8px] font-black text-slate-400 group-hover:text-primary uppercase tracking-[0.15em]">Soltar</span>
+                                                                                </div>
+                                                                            </div>
+                                                                        )}
                                                                     </div>
                                                                 )}
-                                                            </div>
-                                                        )}
-                                                    </Droppable>
+                                                            </Droppable>
+                                                        </div>
+                                                    ))}
                                                 </div>
-                                            ))}
+                                            </div>
                                         </div>
+                                    </div>
+                                </div>
+                    )}
+                            </div>
+                        </DragDropContext>
+
+            {/* PANEL DE DETALLE (OVERLAY ABSOLUTO) */}
+                    {selectedTicket && (
+                        <div className="fixed inset-0 z-[2000] flex items-center justify-end p-6 pointer-events-none">
+                            <div
+                                className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm pointer-events-auto"
+                                onClick={() => setSelectedTicket(null)}
+                            />
+                            <div className="relative w-full max-w-xl h-full bg-white rounded-[3rem] shadow-2xl overflow-hidden flex flex-col animate-in slide-in-from-right-12 duration-500 pointer-events-auto">
+                                {/* Header del Detalle */}
+                                <div className="p-8 pb-4 flex justify-between items-start">
+                                    <div className="space-y-1">
+                                        <div className="flex items-center gap-2 mb-2">
+                                            <div className={clsx(
+                                                "px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest text-white",
+                                                selectedTicket.id_prioridad >= 4 ? "bg-red-500" :
+                                                    selectedTicket.id_prioridad === 3 ? "bg-orange-500" : "bg-primary"
+                                            )}>
+                                                Ticket #{selectedTicket.id}
+                                            </div>
+                                            {selectedTicket.recurrence > 1 && (
+                                                <div className="px-3 py-1 bg-red-100 text-red-600 rounded-full text-[10px] font-black uppercase tracking-widest flex items-center gap-1">
+                                                    <AlertCircle size={10} /> Recurrente
+                                                </div>
+                                            )}
+                                        </div>
+                                        <h2 className="text-2xl font-black uppercase tracking-tighter text-slate-800 leading-none">
+                                            {selectedTicket.nombre_cliente}
+                                        </h2>
+                                        <div className="flex flex-col gap-1 mt-1">
+                                            {selectedTicket.cedula && (
+                                                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">C.C. {selectedTicket.cedula}</p>
+                                            )}
+                                            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">{selectedTicket.asunto}</p>
+                                        </div>
+                                    </div>
+                                    <button
+                                        onClick={() => setSelectedTicket(null)}
+                                        className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-400"
+                                    >
+                                        <X size={24} />
+                                    </button>
+                                </div>
+
+                                <div className="flex-1 overflow-y-auto custom-scrollbar p-8 pt-4">
+                                    <div className="space-y-8">
+                                        {/* Información Principal */}
+                                        <div className="grid grid-cols-2 gap-6">
+                                            <div className="bg-slate-50 p-6 rounded-[2rem] border border-slate-100">
+                                                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3 flex items-center gap-2">
+                                                    <MapPin size={12} className="text-primary" /> Sector / Barrio
+                                                </p>
+                                                <p className="text-sm font-black text-slate-700 uppercase leading-none">{selectedTicket.barrio || 'No especificado'}</p>
+                                                <p className="text-[10px] font-bold text-slate-400 mt-2 truncate">{selectedTicket.direccion}</p>
+                                            </div>
+                                            <div className="bg-slate-50 p-6 rounded-[2rem] border border-slate-100">
+                                                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3 flex items-center gap-2">
+                                                    <Phone size={12} className="text-emerald-500" /> Contacto Directo
+                                                </p>
+                                                <p className="text-sm font-black text-slate-700 leading-none">{selectedTicket.celular || selectedTicket.telefono || 'Sin teléfono'}</p>
+                                                <div className="flex gap-2 mt-2">
+                                                    <a
+                                                        href={`tel:${selectedTicket.celular}`}
+                                                        className="text-[10px] font-black text-primary uppercase hover:underline"
+                                                    >
+                                                        Llamar ahora
+                                                    </a>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <div className="space-y-6">
+
+                                            <div className="flex items-center gap-2 group">
+                                                <div className="w-8 h-8 rounded-xl bg-orange-100 flex items-center justify-center text-orange-600 transition-transform group-hover:rotate-12">
+                                                    <MapPin size={16} />
+                                                </div>
+                                                <div className="flex-1">
+                                                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">Dirección de Servicio</span>
+                                                    <p className="text-xs font-bold text-slate-700">{selectedTicket.direccion}</p>
+                                                    <p className="text-[10px] font-black text-primary uppercase mt-1">Barrio: {selectedTicket.barrio}</p>
+                                                </div>
+                                            </div>
+
+                                            <div className="grid grid-cols-2 gap-4">
+                                                <div className="flex items-center gap-2 group">
+                                                    <div className="w-8 h-8 rounded-xl bg-blue-100 flex items-center justify-center text-blue-600 transition-transform group-hover:rotate-12">
+                                                        <User size={16} />
+                                                    </div>
+                                                    <div>
+                                                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">ID / Usuario</span>
+                                                        <p className="text-xs font-bold text-slate-700 truncate max-w-[120px]">
+                                                            {detailLoading ? '...' : (selectedTicket.id_servicio || 'N/A') + ' / ' + (selectedTicket.usuario_wisphub || 'N/A')}
+                                                        </p>
+                                                    </div>
+                                                </div>
+                                                <div className="flex items-center gap-2 group">
+                                                    <div className="w-8 h-8 rounded-xl bg-emerald-100 flex items-center justify-center text-emerald-600 transition-transform group-hover:rotate-12">
+                                                        <AlertCircle size={16} />
+                                                    </div>
+                                                    <div>
+                                                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">Estado Serv.</span>
+                                                        {detailLoading ? (
+                                                            <span className="animate-pulse bg-slate-100 h-4 w-12 block rounded mt-1" />
+                                                        ) : (
+                                                            <span className={clsx(
+                                                                "text-[10px] font-black uppercase px-2 py-0.5 rounded",
+                                                                selectedTicket.estado_servicio?.toLowerCase() === 'activo' ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"
+                                                            )}>
+                                                                {selectedTicket.estado_servicio}
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+                                                <div className="bg-slate-50 p-3 rounded-2xl border border-slate-100">
+                                                    <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest block mb-1">Creado Por</span>
+                                                    <div className="flex items-center gap-2">
+                                                        <div className="w-5 h-5 rounded-full bg-slate-200 flex items-center justify-center text-[10px] font-black text-slate-500 uppercase">
+                                                            {detailLoading ? '...' : selectedTicket.creado_por?.substring(0, 1)}
+                                                        </div>
+                                                        <span className="text-[10px] font-bold text-slate-600">
+                                                            {detailLoading ? 'Cargando...' : selectedTicket.creado_por}
+                                                        </span>
+                                                    </div>
+                                                </div>
+                                                <div className="bg-slate-50 p-3 rounded-2xl border border-slate-100">
+                                                    <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest block mb-1">Técnico Actual</span>
+                                                    <div className="flex items-center gap-2">
+                                                        <div className="w-5 h-5 rounded-full bg-blue-100 flex items-center justify-center text-[10px] font-black text-blue-500 uppercase">
+                                                            {detailLoading ? '...' : (selectedTicket.tecnico_actual || 'S')?.substring(0, 1)}
+                                                        </div>
+                                                        <span className="text-[10px] font-bold text-slate-600 truncate">
+                                                            {detailLoading ? 'Cargando...' : selectedTicket.tecnico_actual}
+                                                        </span>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <div className="w-full h-px bg-slate-100" />
+
+                                        {/* Description */}
+                                        <div className="space-y-3">
+                                            <div className="flex items-center gap-2">
+                                                <FileText size={16} className="text-slate-400" />
+                                                <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Descripción del Reporte</span>
+                                            </div>
+                                            <div className="bg-slate-50 p-6 rounded-[2rem] border border-slate-100 max-h-[400px] overflow-y-auto custom-scrollbar">
+                                                <div
+                                                    className="text-sm font-medium text-slate-600 leading-relaxed html-content"
+                                                    dangerouslySetInnerHTML={{ __html: selectedTicket.descripcion || 'Sin descripción detallada.' }}
+                                                />
+                                            </div>
+                                        </div>
+
+                                        {/* Metadata / Tags */}
+                                        <div className="flex flex-wrap gap-2 pt-4">
+                                            <div className="px-3 py-1.5 bg-slate-100 rounded-xl text-[9px] font-black text-slate-500 uppercase">
+                                                SLA: {selectedTicket.horas_abierto} Horas
+                                            </div>
+                                            <div className="px-3 py-1.5 bg-slate-100 rounded-xl text-[9px] font-black text-slate-500 uppercase">
+                                                Smart Score: {selectedTicket.score} pts
+                                            </div>
+                                            {selectedTicket.recurrence > 1 && (
+                                                <div className="px-3 py-1.5 bg-red-100 rounded-xl text-[9px] font-black text-red-600 uppercase flex items-center gap-1">
+                                                    <AlertCircle size={10} /> {selectedTicket.recurrence}ª RECURRENCIA
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    {/* Footer */}
+                                    <div className="p-8 bg-white border-t border-slate-100 flex gap-4 mt-8 sticky bottom-0">
+                                        <button
+                                            onClick={() => setSelectedTicket(null)}
+                                            className="flex-1 py-4 bg-slate-900 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-slate-800 transition-all shadow-lg shadow-slate-200"
+                                        >
+                                            Cerrar Detalles
+                                        </button>
+                                        <button
+                                            onClick={() => window.open(`https://wisphub.net/tickets/${selectedTicket.id}/`, '_blank')}
+                                            className="p-4 bg-slate-100 text-slate-600 rounded-2xl hover:bg-slate-200 transition-all"
+                                        >
+                                            <ExternalLink size={18} />
+                                        </button>
                                     </div>
                                 </div>
                             </div>
                         </div>
                     )}
-                </div>
-            </DragDropContext>
 
-            {/* PANEL DE DETALLE (OVERLAY ABSOLUTO) */}
-            {selectedTicket && (
-                <div className="fixed inset-0 z-[2000] flex items-center justify-end p-6 pointer-events-none">
-                    <div
-                        className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm pointer-events-auto"
-                        onClick={() => setSelectedTicket(null)}
-                    />
-                    <div className="relative w-full max-w-xl h-full bg-white rounded-[3rem] shadow-2xl overflow-hidden flex flex-col animate-in slide-in-from-right-12 duration-500 pointer-events-auto">
-                        {/* Header del Detalle */}
-                        <div className="p-8 pb-4 flex justify-between items-start">
-                            <div className="space-y-1">
-                                <div className="flex items-center gap-2 mb-2">
-                                    <div className={clsx(
-                                        "px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest text-white",
-                                        selectedTicket.id_prioridad >= 4 ? "bg-red-500" :
-                                            selectedTicket.id_prioridad === 3 ? "bg-orange-500" : "bg-primary"
-                                    )}>
-                                        Ticket #{selectedTicket.id}
-                                    </div>
-                                    {selectedTicket.recurrence > 1 && (
-                                        <div className="px-3 py-1 bg-red-100 text-red-600 rounded-full text-[10px] font-black uppercase tracking-widest flex items-center gap-1">
-                                            <AlertCircle size={10} /> Recurrente
-                                        </div>
-                                    )}
-                                </div>
-                                <h2 className="text-2xl font-black uppercase tracking-tighter text-slate-800 leading-none">
-                                    {selectedTicket.nombre_cliente}
-                                </h2>
-                                <div className="flex flex-col gap-1 mt-1">
-                                    {selectedTicket.cedula && (
-                                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">C.C. {selectedTicket.cedula}</p>
-                                    )}
-                                    <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">{selectedTicket.asunto}</p>
-                                </div>
-                            </div>
-                            <button
-                                onClick={() => setSelectedTicket(null)}
-                                className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-400"
-                            >
-                                <X size={24} />
-                            </button>
-                        </div>
-
-                        <div className="flex-1 overflow-y-auto custom-scrollbar p-8 pt-4">
-                            <div className="space-y-8">
-                                {/* Información Principal */}
-                                <div className="grid grid-cols-2 gap-6">
-                                    <div className="bg-slate-50 p-6 rounded-[2rem] border border-slate-100">
-                                        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3 flex items-center gap-2">
-                                            <MapPin size={12} className="text-primary" /> Sector / Barrio
-                                        </p>
-                                        <p className="text-sm font-black text-slate-700 uppercase leading-none">{selectedTicket.barrio || 'No especificado'}</p>
-                                        <p className="text-[10px] font-bold text-slate-400 mt-2 truncate">{selectedTicket.direccion}</p>
-                                    </div>
-                                    <div className="bg-slate-50 p-6 rounded-[2rem] border border-slate-100">
-                                        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3 flex items-center gap-2">
-                                            <Phone size={12} className="text-emerald-500" /> Contacto Directo
-                                        </p>
-                                        <p className="text-sm font-black text-slate-700 leading-none">{selectedTicket.celular || selectedTicket.telefono || 'Sin teléfono'}</p>
-                                        <div className="flex gap-2 mt-2">
-                                            <a
-                                                href={`tel:${selectedTicket.celular}`}
-                                                className="text-[10px] font-black text-primary uppercase hover:underline"
-                                            >
-                                                Llamar ahora
-                                            </a>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <div className="space-y-6">
-
-                                    <div className="flex items-center gap-2 group">
-                                        <div className="w-8 h-8 rounded-xl bg-orange-100 flex items-center justify-center text-orange-600 transition-transform group-hover:rotate-12">
-                                            <MapPin size={16} />
-                                        </div>
-                                        <div className="flex-1">
-                                            <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">Dirección de Servicio</span>
-                                            <p className="text-xs font-bold text-slate-700">{selectedTicket.direccion}</p>
-                                            <p className="text-[10px] font-black text-primary uppercase mt-1">Barrio: {selectedTicket.barrio}</p>
-                                        </div>
-                                    </div>
-
-                                    <div className="grid grid-cols-2 gap-4">
-                                        <div className="flex items-center gap-2 group">
-                                            <div className="w-8 h-8 rounded-xl bg-blue-100 flex items-center justify-center text-blue-600 transition-transform group-hover:rotate-12">
-                                                <User size={16} />
-                                            </div>
-                                            <div>
-                                                <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">ID / Usuario</span>
-                                                <p className="text-xs font-bold text-slate-700 truncate max-w-[120px]">
-                                                    {detailLoading ? '...' : (selectedTicket.id_servicio || 'N/A') + ' / ' + (selectedTicket.usuario_wisphub || 'N/A')}
-                                                </p>
-                                            </div>
-                                        </div>
-                                        <div className="flex items-center gap-2 group">
-                                            <div className="w-8 h-8 rounded-xl bg-emerald-100 flex items-center justify-center text-emerald-600 transition-transform group-hover:rotate-12">
-                                                <AlertCircle size={16} />
-                                            </div>
-                                            <div>
-                                                <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">Estado Serv.</span>
-                                                {detailLoading ? (
-                                                    <span className="animate-pulse bg-slate-100 h-4 w-12 block rounded mt-1" />
-                                                ) : (
-                                                    <span className={clsx(
-                                                        "text-[10px] font-black uppercase px-2 py-0.5 rounded",
-                                                        selectedTicket.estado_servicio?.toLowerCase() === 'activo' ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"
-                                                    )}>
-                                                        {selectedTicket.estado_servicio}
-                                                    </span>
-                                                )}
-                                            </div>
-                                        </div>
-                                    </div>
-
-                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
-                                        <div className="bg-slate-50 p-3 rounded-2xl border border-slate-100">
-                                            <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest block mb-1">Creado Por</span>
-                                            <div className="flex items-center gap-2">
-                                                <div className="w-5 h-5 rounded-full bg-slate-200 flex items-center justify-center text-[10px] font-black text-slate-500 uppercase">
-                                                    {detailLoading ? '...' : selectedTicket.creado_por?.substring(0, 1)}
-                                                </div>
-                                                <span className="text-[10px] font-bold text-slate-600">
-                                                    {detailLoading ? 'Cargando...' : selectedTicket.creado_por}
-                                                </span>
-                                            </div>
-                                        </div>
-                                        <div className="bg-slate-50 p-3 rounded-2xl border border-slate-100">
-                                            <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest block mb-1">Técnico Actual</span>
-                                            <div className="flex items-center gap-2">
-                                                <div className="w-5 h-5 rounded-full bg-blue-100 flex items-center justify-center text-[10px] font-black text-blue-500 uppercase">
-                                                    {detailLoading ? '...' : (selectedTicket.tecnico_actual || 'S')?.substring(0, 1)}
-                                                </div>
-                                                <span className="text-[10px] font-bold text-slate-600 truncate">
-                                                    {detailLoading ? 'Cargando...' : selectedTicket.tecnico_actual}
-                                                </span>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <div className="w-full h-px bg-slate-100" />
-
-                                {/* Description */}
-                                <div className="space-y-3">
-                                    <div className="flex items-center gap-2">
-                                        <FileText size={16} className="text-slate-400" />
-                                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Descripción del Reporte</span>
-                                    </div>
-                                    <div className="bg-slate-50 p-6 rounded-[2rem] border border-slate-100 max-h-[400px] overflow-y-auto custom-scrollbar">
-                                        <div
-                                            className="text-sm font-medium text-slate-600 leading-relaxed html-content"
-                                            dangerouslySetInnerHTML={{ __html: selectedTicket.descripcion || 'Sin descripción detallada.' }}
-                                        />
-                                    </div>
-                                </div>
-
-                                {/* Metadata / Tags */}
-                                <div className="flex flex-wrap gap-2 pt-4">
-                                    <div className="px-3 py-1.5 bg-slate-100 rounded-xl text-[9px] font-black text-slate-500 uppercase">
-                                        SLA: {selectedTicket.horas_abierto} Horas
-                                    </div>
-                                    <div className="px-3 py-1.5 bg-slate-100 rounded-xl text-[9px] font-black text-slate-500 uppercase">
-                                        Smart Score: {selectedTicket.score} pts
-                                    </div>
-                                    {selectedTicket.recurrence > 1 && (
-                                        <div className="px-3 py-1.5 bg-red-100 rounded-xl text-[9px] font-black text-red-600 uppercase flex items-center gap-1">
-                                            <AlertCircle size={10} /> {selectedTicket.recurrence}ª RECURRENCIA
-                                        </div>
-                                    )}
-                                </div>
-                            </div>
-
-                            {/* Footer */}
-                            <div className="p-8 bg-white border-t border-slate-100 flex gap-4 mt-8 sticky bottom-0">
-                                <button
-                                    onClick={() => setSelectedTicket(null)}
-                                    className="flex-1 py-4 bg-slate-900 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-slate-800 transition-all shadow-lg shadow-slate-200"
-                                >
-                                    Cerrar Detalles
-                                </button>
-                                <button
-                                    onClick={() => window.open(`https://wisphub.net/tickets/${selectedTicket.id}/`, '_blank')}
-                                    className="p-4 bg-slate-100 text-slate-600 rounded-2xl hover:bg-slate-200 transition-all"
-                                >
-                                    <ExternalLink size={18} />
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
-
-            <style>{`
+                    <style>{`
                 .html-content img {
                     max-width: 100% !important;
                     height: auto !important;
@@ -1288,7 +1319,7 @@ export function OperationsDispatch() {
                     word-break: break-word;
                 }
             `}</style>
-        </div>
-    );
+                </div>
+                );
 }
 
