@@ -874,7 +874,7 @@ export const WorkflowService = {
 
                     if (isStrictlyMine) {
                         myApiTicketIds.push((ticket.id || ticket.id_ticket).toString());
-                        await this.syncSingleTicketMirror(ticket, allProfiles, profile);
+                        await this.syncSingleTicketMirror(ticket, allProfiles, profile, { autoAssign: true });
                         await new Promise(r => setTimeout(r, 50));
                     }
                 } catch (e) {
@@ -964,7 +964,7 @@ export const WorkflowService = {
     /**
      * Procesa un solo ticket usando UPSERT para sincronización espejo
      */
-    async syncSingleTicketMirror(ticket: any, profiles: any[], syncOwnerProfile?: any): Promise<void> {
+    async syncSingleTicketMirror(ticket: any, profiles: any[], syncOwnerProfile?: any, options: { autoAssign?: boolean } = {}): Promise<void> {
         try {
             const ticketIdStr = ticket.id.toString();
             const techName = ticket.tecnico || ticket.nombre_tecnico || 'Sin asignar';
@@ -1092,18 +1092,28 @@ export const WorkflowService = {
 
             if (aErr) throw aErr;
 
-            // 5. Upsert Workitem
-            const { error: wErr } = await supabase
+            // 5. Upsert Workitem (SOLO SI AUTO-ASSIGN O SI YA EXISTE)
+            // Esto evita que tickets nuevos en WispHub "salten" al técnico sin intervención manual en la App
+            const { data: existingWorkItem } = await supabase
                 .from('workflow_workitems')
-                .upsert({
-                    activity_id: activity.id,
-                    participant_id: profile.id,
-                    participant_type: 'user',
-                    status: finalStatus,
-                    updated_at: new Date().toISOString()
-                }, { onConflict: 'activity_id,participant_id' });
+                .select('id')
+                .eq('activity_id', activity.id)
+                .eq('participant_id', profile.id)
+                .maybeSingle();
 
-            if (wErr) throw wErr;
+            if (options.autoAssign || existingWorkItem) {
+                const { error: wErr } = await supabase
+                    .from('workflow_workitems')
+                    .upsert({
+                        activity_id: activity.id,
+                        participant_id: profile.id,
+                        participant_type: 'user',
+                        status: finalStatus,
+                        updated_at: new Date().toISOString()
+                    }, { onConflict: 'activity_id,participant_id' });
+
+                if (wErr) throw wErr;
+            }
 
             // 6. LIMPIEZA AGRESIVA: Si el ticket cambió de dueño, reasignamos las otras tareas PE
             if (finalStatus === 'PE') {
@@ -1142,7 +1152,7 @@ export const WorkflowService = {
             const allProfiles = await this.getPlatformUsers();
 
             for (const ticket of allApiTickets) {
-                await this.syncSingleTicketMirror(ticket, allProfiles);
+                await this.syncSingleTicketMirror(ticket, allProfiles, undefined, { autoAssign: false });
                 // No hay pausa aquí para procesar rápido las métricas globales
             }
 

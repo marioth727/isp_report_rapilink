@@ -315,10 +315,77 @@ Al interpretar `02/09/2026` (9 de febrero) como `02 de Septiembre`, la App calcu
 
 **Solución (Heurística de Parseo):**
 Se implementó una lógica de autodetcción en `isTodayResilient` y `parseWH`:
-1. Si el primer número es `> 12`, se asume **DD/MM**.
-2. Si el segundo número es `> 12`, se asume **MM/DD**.
-3. Si ambos son `<= 12`, se asume por defecto **MM/DD** (estándar interno de la API de WispHub).
+1.  Si el primer número es `> 12`, se asume **DD/MM**.
+2.  Si el segundo número es `> 12`, se asume **MM/DD**.
+3.  Si ambos son `<= 12`, se asume por defecto **MM/DD** (estándar interno de la API de WispHub).
 
 ### Estrategia de Sincronización Fallback
 Para evitar que un ticket "parpadee" o desaparezca mientras WispHub actualiza sus índices globales, se creó un estado de **"Sincronizando estado"**:
-- Si un ticket ya no aparece en la lista de "Abiertos" pero aún no ha sido reportado en la lista de "Terminados" de la API, la App mantiene el ticket visible con un indicador de carga hasta que la confirmación oficial llega vía SWR.
+-   Si un ticket ya no aparece en la lista de "Abiertos" pero aún no ha sido reportado en la lista de "Terminados" de la API, la App mantiene el ticket visible con un indicador de carga hasta que la confirmación oficial llega vía SWR.
+
+## 8. Optimizaciones en Centro de Despacho (Premium UX)
+
+> [!IMPORTANT]
+> **Fecha**: 2026-02-11  
+> **Contexto**: Refinamiento estético y corrección de lógica de reordenamiento.
+
+### Interfaz Ultra-Compacta
+Para maximizar el espacio útil del mapa sin perder información crítica, se implementó un diseño de alta densidad:
+-   **Header Central**: Reducción de paddings (`py-2.5`) y escalado de fuentes (`text-xl`). El indicador "Vivo" se simplificó para evitar distracciones.
+-   **Tarjetas de Tickets**: Reducción drástica de márgenes y paddings. Los IDs y el tiempo de apertura se alinearon para permitir ver hasta un 40% más de tickets en el mismo espacio vertical.
+
+### Lógica de Reordenamiento Bidireccional
+**Problema**: El sistema de `React-Beautiful-DND` fallaba al intentar mover tickets hacia arriba ("Up") dentro de la lista de un técnico porque la lógica original solo concatenaba al final.
+
+**Solución Implementada**:
+-   Uso de `splice` en lugar de `Array.filter` + `concat`.
+-   **Identificación por ID**: Se abandonó el uso de índices del array para identificar el item movido, utilizando siempre el `draggableId` para garantizar que la mutación de estado sea atómica e independiente del orden visual previo.
+-   **Feedback Visual**: Las dropzones ahora tienen un estado `bg-slate-100/40` permanente y reaccionan con un "glow" de color primario (`bg-primary/10`) al detectar un ticket encima (`isDraggingOver`).
+
+### Persistencia y Consistencia
+-   **Local Manifest**: El despacho utiliza un manifiesto local (`dispatch_manifest_YYYY-MM-DD`) para recordar qué técnicos tienen tickets asignados antes de la publicación final a WispHub.
+-   **Sincronización Atómica**: El botón "Publicar" ejecuta una secuencia de cambios de técnico en la API de WispHub y limpia el manifiesto local solo tras el éxito de la operación.
+
+## 9. Lógica de Despacho Manual Estricto (Visual vs Data)
+
+> [!CRITICAL]
+> **Fecha**: 2026-02-12
+> **Contexto**: Resolución del conflicto entre "Sincronización de Datos" y "Limpieza Visual del Tablero".
+
+### El Dilema de la Auto-Asignación
+El sistema WispHub asigna tickets automáticamente a los técnicos. Originalmente, la App reflejaba esto inmediatamente en el tablero de despacho.
+**Problema:** Los despachadores sentían que el tablero se "ensuciaba" con tickets que ellos no habían gestionado personalmente ese día, perdiendo la sensación de control sobre la jornada de despacho.
+
+### Solución: Desacoplamiento Visual
+Se implementó una **separación estricta** entre la asignación de datos y la visualización en el tablero de despacho (`OperationsDispatch.tsx`).
+
+1. **Backend (Datos) = Sincronización Total**
+   - La base de datos y la App de los técnicos **SÍ** reflejan la asignación real de WispHub.
+   - Si WispHub dice que el ticket es de "Juan", "Juan" lo verá en su celular.
+
+2. **Frontend (Despacho) = Manual Only**
+   - Al cargar el tablero de despacho, **SE IGNORA** la asignación que viene de la base de datos para las columnas de los técnicos.
+   - Las columnas de los técnicos ("Juan", "Pedro") inician **VACÍAS** (o solo con lo que esté en el borrador local `dispatch_manual_strict_v1`).
+   - Todos los tickets, incluso los ya asignados en BD, aparecen en el **Pool de Pendientes** (Izquierda).
+
+### Reglas de Implementación
+Para mantener este comportamiento, el `useEffect` de carga inicial en `OperationsDispatch.tsx` **NO DEBE** mezclar los resultados de `WorkflowService.getTodayAssignments()`.
+
+```typescript
+// ✅ CORRECTO (Manual Strict):
+if (technicians.length > 0) {
+    setAssignedRoutes(prev => {
+        // Solo carga lo que está en localStorage (draftRoutes)
+        const next = { ...prev, ...draftRoutes }; 
+        return next;
+    });
+}
+
+// ❌ PROHIBIDO (Causa "ensuciamiento" visual):
+// WorkflowService.getTodayAssignments().then(...) -> NO HACER MERGE
+```
+
+### Cache Key Strategy
+Si alguna vez se requiere "resetear" la vista de despacho debido a un cambio de lógica, se debe rotar la clave de `localStorage`:
+- `dispatch_draft_schedule_v1` (Obsoleto - Mezclaba BD)
+- `dispatch_manual_strict_v1` (Actual - Solo Manual)
