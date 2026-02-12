@@ -73,14 +73,12 @@ function SidebarContent({
     return (
         <div className="flex flex-col h-full bg-[#11101d] text-white">
             {/* Logo/Brand Section */}
-            <div className="p-6 flex items-center gap-3">
-                <div className="w-10 h-10 bg-primary/20 rounded-xl flex items-center justify-center border border-primary/30">
-                    <Shield className="w-6 h-6 text-primary" />
-                </div>
-                <div className="flex flex-col">
-                    <span className="text-lg font-bold tracking-tight leading-tight">Rapilink</span>
-                    <span className="text-[10px] text-gray-500 font-medium uppercase tracking-[0.2em]">CRM Reports</span>
-                </div>
+            <div className="px-6 py-8 flex items-center justify-center">
+                <img
+                    src="/logo-white.png"
+                    alt="RapiLink SAS"
+                    className="h-10 w-auto object-contain"
+                />
             </div>
 
             {/* Main Navigation */}
@@ -498,10 +496,13 @@ export function Layout() {
             </aside>
 
             {/* Mobile Header - Visible only on mobile */}
-            <div className="lg:hidden fixed top-0 left-0 right-0 h-16 border-b border-border bg-card flex items-center justify-between px-4 z-40">
-                <div className="flex items-center gap-2">
-                    <Shield className="w-6 h-6 text-primary" />
-                    <h1 className="text-lg font-bold text-primary">Rapilink</h1>
+            <div className="lg:hidden fixed top-0 left-0 right-0 h-16 border-b border-border bg-[#11101d] flex items-center justify-between px-4 z-40">
+                <div className="flex items-center">
+                    <img
+                        src="/logo-white.png"
+                        alt="RapiLink SAS"
+                        className="h-8 w-auto object-contain"
+                    />
                 </div>
                 <button
                     onClick={() => setMobileMenuOpen(true)}
