@@ -1,9 +1,21 @@
 import { useState, useEffect } from 'react';
-import { CheckCircle2, Clock, ChevronRight, X, MessageSquare, AlertTriangle, RefreshCw, Layers } from 'lucide-react';
-import { supabase } from '../lib/supabase';
-import { WorkflowService } from '../lib/workflowService';
+import { CheckCircle2, Clock, ChevronRight, X, MessageSquare, AlertTriangle, RefreshCw, Layers, Package, MapPin, Play, Camera, Trash2 } from 'lucide-react';
+import { supabase, safeGetUser } from '../lib/supabase';
+import { WorkflowService, REQUIREMENTS } from '../lib/workflowService';
+import { WisphubService } from '../lib/wisphub';
+import { convertToJpeg, type ImageMetadata } from '../lib/imageUtils';
+import { syncQueueService } from '../lib/syncQueueService';
+import { draftService } from '../lib/draftService';
 import { OperationsHeader } from '../components/operations/OperationsHeader';
+import { EditTicketModal } from '../components/operations/EditTicketModal'; // Restaurado
+import { MaterialSelector } from '../components/operations/MaterialSelector';
+import { canEditTicket, canEscalateTicket } from '../lib/permissions';
 import clsx from 'clsx';
+const dispatchToast = (message: string, type: 'success' | 'error' | 'info' | 'loading', description?: string, id?: string) => {
+    window.dispatchEvent(new CustomEvent('app:toast', {
+        detail: { message, type, description, id, duration: type === 'loading' ? 0 : 4000 }
+    }));
+};
 
 export function OperationsMyTasks() {
     const [loading, setLoading] = useState(false);
@@ -15,29 +27,95 @@ export function OperationsMyTasks() {
     const [targetTechnician, setTargetTechnician] = useState('');
     const [processing, setProcessing] = useState(false);
     const [platformUsers, setPlatformUsers] = useState<any[]>([]);
-    const [evidenceFile, setEvidenceFile] = useState<File | null>(null);
+    const [evidenceFiles, setEvidenceFiles] = useState<File[]>([]);
     const [priority, setPriority] = useState<number>(2);
+    const [finalStatus, setFinalStatus] = useState<number>(4); // 4=Cerrado, 3=Resuelto
+    const [technicianStock, setTechnicianStock] = useState<any[]>([]);
+    const [selectedMaterials, setSelectedMaterials] = useState<Record<string, number>>({});
+    const [timelineStatus, setTimelineStatus] = useState<Record<string, { started?: boolean, arrived?: boolean }>>(() => {
+        const saved = localStorage.getItem('tech_timeline_v1');
+        return saved ? JSON.parse(saved) : {};
+    });
+    const [pendingSyncCount, setPendingSyncCount] = useState(0);
+    const [userProfile, setUserProfile] = useState<any | null>(null); // RBAC State
+    const [isEditModalOpen, setIsEditModalOpen] = useState(false); // Edit Modal State
+    const [expandedTickets, setExpandedTickets] = useState<Set<string>>(new Set());
+
+    // --- SISTEMA DE BORRADORES (IndexedDB) ---
+    // 1. Guardar fotos automáticamente cuando cambian
+    useEffect(() => {
+        if (selectedTask?.workflow_activities?.workflow_processes?.reference_id && evidenceFiles.length > 0) {
+            const ticketId = selectedTask.workflow_activities.workflow_processes.reference_id;
+            console.log(`[Drafts] 💾 Guardando borrador para Ticket #${ticketId} (${evidenceFiles.length} fotos)`);
+            draftService.saveDraft(String(ticketId), evidenceFiles).catch(err => {
+                console.error("[Drafts] Error guardando borrador:", err);
+            });
+        }
+    }, [evidenceFiles, selectedTask]);
+
+    // 2. Recuperar borrador al seleccionar tarea
+    useEffect(() => {
+        if (selectedTask?.workflow_activities?.workflow_processes?.reference_id) {
+            const ticketId = selectedTask.workflow_activities.workflow_processes.reference_id;
+            draftService.getDraft(String(ticketId)).then(files => {
+                if (files && files.length > 0 && evidenceFiles.length === 0) {
+                    console.log(`[Drafts] 📦 Borrador recuperado para Ticket #${ticketId}: ${files.length} fotos`);
+                    setEvidenceFiles(files);
+                    dispatchToast("Borrador recuperado", "info", `Se cargaron ${files.length} fotos pendientes.`);
+                }
+            }).catch(err => {
+                console.error("[Drafts] Error recuperando borrador:", err);
+            });
+        }
+    }, [selectedTask]);
+
+    const toggleTicketExpansion = (id: string) => {
+        const newSet = new Set(expandedTickets);
+        if (newSet.has(id)) newSet.delete(id);
+        else newSet.add(id);
+        setExpandedTickets(newSet);
+    };
+
 
     // Función principal: Cargar tareas desde Supabase
     const loadMyTasks = async () => {
         setLoading(true);
         try {
-            const { data: { user } } = await supabase.auth.getUser();
-            if (!user) return;
+            console.log('\n=======================================');
+            console.log('[MyTasks-Trace] 1. INICIANDO CARGA DE TAREAS');
+            const { data: { user }, error: authError } = await safeGetUser();
 
-            console.info('[MyTasks] 📥 Cargando tareas pendientes desde Supabase...');
-            console.log(`[DEBUG] Current Auth User ID: ${user.id}`);
-            console.log(`[DEBUG] Current Auth User Email: ${user.email}`);
-
-            // Resolvemos el perfil (mismo fallback que el servicio)
-            let { data: profile } = await supabase.from('profiles').select('id').eq('id', user.id).maybeSingle();
-            if (!profile && user.email) {
-                const { data: emailProfile } = await supabase.from('profiles').select('id').eq('email', user.email).maybeSingle();
-                profile = emailProfile;
-                if (profile) console.log(`[DEBUG] Identity linked via email. Using Profile ID: ${profile.id}`);
+            if (authError || !user) {
+                console.warn('[MyTasks-Trace] ❌ No hay usuario autenticado o error en auth. Cancelando.');
+                return;
             }
 
-            const targetParticipantId = profile?.id || user.id;
+            console.log(`[MyTasks-Trace] 2. Auth User ID: ${user.id} | Email: ${user.email}`);
+
+            // Resolvemos el perfil (mismo fallback que el servicio)
+            const { data: profile, error: profileError } = await supabase.from('profiles').select('id, full_name').eq('id', user.id).maybeSingle();
+
+            if (profileError) {
+                if (profileError.message?.includes('aborted') || (profileError as any).name === 'AbortError') {
+                    console.warn('[MyTasks-Trace] ⚠️ Perfil abortado. Reintentando después...');
+                    return;
+                }
+            }
+
+            let finalProfile = profile;
+
+            if (!finalProfile && user.email) {
+                const { data: emailProfile, error: emailError } = await supabase.from('profiles').select('id, full_name').eq('email', user.email).maybeSingle();
+                if (!emailError) finalProfile = emailProfile;
+                if (finalProfile) console.log(`[MyTasks-Trace] 3. Perfil encontrado vía email: ${finalProfile.id} (${finalProfile.full_name})`);
+            } else if (finalProfile) {
+                console.log(`[MyTasks-Trace] 3. Perfil encontrado vía UUID: ${finalProfile.id} (${finalProfile.full_name})`);
+            } else {
+                console.log(`[MyTasks-Trace] 3. ⚠️ No se encontró perfil. Se usará Auth User ID.`);
+            }
+
+            const targetParticipantId = finalProfile?.id || user.id;
+            console.log(`[MyTasks-Trace] 4. Ejecutando Query Supabase buscando participant_id = ${targetParticipantId} y status = PE...`);
 
             // Query simple con joins necesarios
             const { data, error } = await supabase
@@ -50,6 +128,7 @@ export function OperationsMyTasks() {
                     workflow_activities (
                         name,
                         workflow_processes (
+                            id,
                             title,
                             reference_id,
                             priority,
@@ -61,51 +140,35 @@ export function OperationsMyTasks() {
                 .eq('status', 'PE')
                 .order('created_at', { ascending: false });
 
-            if (error) throw error;
+            if (error) {
+                // Manejo de AbortError silencioso para evitar parpadeos/limpiezas de estado ante recargas
+                if (error.message?.includes('aborted') || (error as any).name === 'AbortError') {
+                    console.warn('[MyTasks-Trace] ⚠️ Carga abortada por el navegador. Manteniendo estado previo.');
+                    return;
+                }
+                console.error('[MyTasks-Trace] ❌ Error en Query Supabase:', error);
+                throw error;
+            }
+
+            console.log(`[MyTasks-Trace] 5. Query OK. Tickets devueltos por BD: ${data?.length || 0}`);
 
             setMyTasks(data || []);
-            // console.info(`[MyTasks] ✅ ${data?.length || 0} tareas visualizadas.`); // Reducir ruido
+            console.log(`[MyTasks-Trace] 6. Estado React (myTasks) actualizado.`);
+            console.log('=======================================\n');
+
+            // Guardamos el perfil completo para RBAC
+            if (finalProfile) {
+                const { data: fullProfile } = await supabase.from('profiles').select('*').eq('id', finalProfile.id).maybeSingle();
+                if (fullProfile) setUserProfile(fullProfile);
+            }
+
         } catch (error) {
-            console.error('[MyTasks] ❌ Error cargando tareas:', error);
+            console.error('[MyTasks-Trace] ❌ Error general en loadMyTasks:', error);
         } finally {
             setLoading(false);
         }
     };
 
-    // Función para completar o escalar
-    const handleAction = async () => {
-        if (!selectedTask || !actionType || !comment.trim()) return;
-        setProcessing(true);
-        try {
-            let success = false;
-            // Preparamos opciones (Prioridad y Archivo)
-            const options = {
-                priority: priority,
-                file: evidenceFile || undefined
-            };
-
-            if (actionType === 'complete') {
-                success = await WorkflowService.completeAndSyncWorkItem(selectedTask.id, comment, options);
-            } else {
-                // Pasamos options directamente: ahora escalateWorkItem maneja la sincronización FULL PUT internamente
-                success = await WorkflowService.escalateWorkItem(selectedTask.id, comment, targetTechnician || undefined, options);
-            }
-
-            if (success) {
-                console.info('[MyTasks] ✅ Acción completada con éxito.');
-                setSelectedTask(null);
-                setComment('');
-                setTargetTechnician('');
-                setEvidenceFile(null);
-                setPriority(2);
-                await loadMyTasks();
-            }
-        } catch (error) {
-            console.error('[MyTasks] ❌ Error en acción:', error);
-        } finally {
-            setProcessing(false);
-        }
-    };
 
     // Función para sincronización profunda (60 días)
     const handleDeepSync = async () => {
@@ -115,6 +178,7 @@ export function OperationsMyTasks() {
             console.log('[MyTasks] 🚀 Iniciando Sincronización Profunda (60 días)...');
             await WorkflowService.syncMyTickets(true);
             await loadMyTasks();
+            await syncTimelineWithEvents();
             console.log('[MyTasks] ✅ Sincronización Profunda completada.');
         } catch (error) {
             console.error('[MyTasks] ❌ Error en Deep Sync:', error);
@@ -124,32 +188,192 @@ export function OperationsMyTasks() {
     };
 
     const loadPlatformData = async () => {
-        console.log('[DEBUG] Iniciando carga de usuarios de la plataforma...');
         const users = await WorkflowService.getPlatformUsers();
-        console.log('[DEBUG] Usuarios cargados:', users.length);
-        console.log('[DEBUG] Muestra de usuarios:', users.slice(0, 3));
         setPlatformUsers(users);
     };
 
-    // CICLO DE VIDA (Patrón SWR)
+    const loadStock = async () => {
+        try {
+            const { data: { user } } = await supabase.auth.getUser();
+            if (!user) return;
+
+            const { data: assets } = await supabase
+                .from('inventory_assets')
+                .select('*, inventory_items(name, is_serialized, inventory_categories(unit_type))')
+                .eq('current_holder_id', user.id);
+
+            setTechnicianStock(assets || []);
+        } catch (e) {
+            console.error('Error cargando stock:', e);
+        }
+    };
+
+    const saveTimeline = (newTimeline: any) => {
+        setTimelineStatus(newTimeline);
+        localStorage.setItem('tech_timeline_v1', JSON.stringify(newTimeline));
+    };
+
+    const handleStartWork = async (ticketId: string) => {
+        const ok = await WisphubService.setTicketStartTime(ticketId);
+        if (ok) {
+            saveTimeline({ ...timelineStatus, [ticketId]: { ...timelineStatus[ticketId], started: true } });
+        }
+    };
+
+
+    const handleArrival = async (ticketId: string) => {
+        console.log('[handleArrival] Clicked for ticket:', ticketId);
+
+        if (!ticketId || ticketId === '---') {
+            console.error('[handleArrival] Error: No se encontró un ID de ticket válido.');
+            return;
+        }
+
+        setProcessing(true);
+        try {
+            const ok = await WisphubService.sendArrivalComment(ticketId);
+            console.log('[handleArrival] Result:', ok);
+            if (ok) {
+                saveTimeline({ ...timelineStatus, [ticketId]: { ...timelineStatus[ticketId], arrived: true } });
+            } else {
+                console.error('[handleArrival] Failed to send arrival event');
+            }
+        } finally {
+            setProcessing(false);
+        }
+    };
+
+    // Nueva función para sincronizar el estado visual con los eventos reales en Supabase
+    const syncTimelineWithEvents = async () => {
+        try {
+            const { data: { user } } = await supabase.auth.getUser();
+            if (!user) return;
+
+            // Consultamos eventos de hoy para los tickets cargados
+            const ticketIds = myTasks.map(wi => wi.workflow_activities?.workflow_processes?.reference_id).filter(id => id && id !== '---');
+            if (ticketIds.length === 0) return;
+
+            const { data: events, error } = await supabase
+                .from('ticket_events')
+                .select('ticket_id, event_type')
+                .in('ticket_id', ticketIds)
+                .in('event_type', ['arrival']);
+
+            if (error) throw error;
+
+            const newTimeline = { ...timelineStatus };
+            events?.forEach(ev => {
+                if (ev.event_type === 'arrival') {
+                    newTimeline[ev.ticket_id] = { ...newTimeline[ev.ticket_id], arrived: true, started: true }; // Si llegó, asumimos iniciado
+                }
+            });
+
+            saveTimeline(newTimeline);
+        } catch (e) {
+            console.error('[Sync] Error sincronizando línea de tiempo:', e);
+        }
+    };
+
+    // CICLO DE VIDA (Patrón SWR + Realtime)
     useEffect(() => {
+        let isMounted = true;
+        let subscription: ReturnType<typeof supabase.channel> | null = null;
+
         const init = async () => {
-            // 1. Carga INMEDIATA de datos locales (SWR)
-            await loadPlatformData();
+            // 1. Carga PRIORITARIA: Mis Tareas (Para que el técnico no espere a metadatos)
             await loadMyTasks();
 
-            // 2. Sincronización en SEGUNDO PLANO (Background)
-            setSyncing(true);
+            if (!isMounted) return;
+
+            // 2. Carga de Apoyo: Stock y Perfiles
+            loadPlatformData(); // No await para no bloquear
+            loadStock();        // No await para no bloquear
+
+            // 3. Verificar Cola de Sincronización
+            syncQueueService.getQueue().then(queue => {
+                if (isMounted) setPendingSyncCount(queue.length);
+            });
+
+            // 4. SUPABASE REALTIME (WebSockets)
             try {
-                console.log('[OperationsMyTasks] 🔄 Ejecutando Sincronización Espejo (Background)...');
-                await WorkflowService.syncMyTickets(); // Default (15 días)
-                // 3. Refrescar datos silenciosamente tras sync
-                await loadMyTasks();
+                const { data: { user } } = await safeGetUser();
+                if (user && isMounted) {
+                    const { data: profile } = await supabase.from('profiles').select('id').eq('id', user.id).maybeSingle();
+                    let finalProfileId = profile?.id || user.id;
+
+                    if (!profile && user.email) {
+                        const { data: emailProfile } = await supabase.from('profiles').select('id').eq('email', user.email).maybeSingle();
+                        if (emailProfile) finalProfileId = emailProfile.id;
+                    }
+                    const targetParticipantId = finalProfileId;
+
+                    console.log(`[MyTasks:Realtime] 📡 Suscribiendo al canal Postgres para Participant: ${targetParticipantId}`);
+
+                    if (subscription) { supabase.removeChannel(subscription); }
+
+                    subscription = supabase
+                        .channel('mis-tareas-realtime')
+                        .on(
+                            'postgres_changes',
+                            { event: '*', schema: 'public', table: 'workflow_workitems' },
+                            async (payload) => {
+                                const isRelevant = ((payload.new as any) && (payload.new as any).participant_id === targetParticipantId) ||
+                                    ((payload.old as any) && (payload.old as any).participant_id === targetParticipantId);
+
+                                if (!isRelevant) return;
+
+                                console.log('%c[MyTasks:Realtime] 🟣 EVENTO WEBSOCKET RECIBIDO 🟣', 'color: white; background: #8b5cf6; font-size: 14px; font-weight: bold; padding: 4px; border-radius: 4px;', payload);
+                                if (payload.eventType === 'INSERT') {
+                                    dispatchToast("¡Nueva Tarea!", "info", "El centro de despacho te ha asignado un nuevo ticket.", "new-ticket-ws");
+                                } else if (payload.eventType === 'DELETE') {
+                                    dispatchToast("Ticket Reasignado", "info", "Una tarea ha sido removida de tu bandeja.", "rm-ticket-ws");
+                                }
+
+                                await loadMyTasks();
+                            }
+                        )
+                        .subscribe();
+                }
+            } catch (e) {
+                console.error('[MyTasks:Realtime] Error al iniciar suscripción websocket:', e);
+            }
+
+            // 5. Sincronización en SEGUNDO PLANO (Silent Background)
+            try {
+                // Solo iniciamos syncing visual si no tenemos tareas (primera carga)
+                if (myTasks.length === 0) setSyncing(true);
+
+                console.log('[OperationsMyTasks] 🔄 Sincronización en segundo plano iniciada...');
+                await WorkflowService.syncMyTickets();
+            } catch (syncError) {
+                console.warn('[OperationsMyTasks] ⚠️ Sincronización abortada/fallida:', syncError);
             } finally {
-                setSyncing(false);
+                if (isMounted) {
+                    await loadMyTasks();
+                    await syncTimelineWithEvents();
+                    setSyncing(false);
+                }
             }
         };
         init();
+
+        // Intervalo para procesar cola si hay internet
+        const interval = setInterval(async () => {
+            if (navigator.onLine && isMounted) {
+                await syncQueueService.processQueue();
+                const queue = await syncQueueService.getQueue();
+                if (isMounted) setPendingSyncCount(queue.length);
+            }
+        }, 15000); // Cada 15 segs
+
+        return () => {
+            isMounted = false;
+            clearInterval(interval);
+            if (subscription) {
+                console.log('[MyTasks:Realtime] 🔌 Apagando radio/desconectando WebSockets al desmontar.');
+                supabase.removeChannel(subscription);
+            }
+        };
     }, []);
 
     return (
@@ -178,11 +402,19 @@ export function OperationsMyTasks() {
                             <Layers size={14} />
                             <span className="text-[10px] font-bold uppercase tracking-wide">Deep Sync</span>
                         </button>
+
+                        {/* Indicador de Cola de Sync */}
+                        {pendingSyncCount > 0 && (
+                            <div className="flex items-center gap-2 bg-orange-50 text-orange-600 px-3 py-1.5 rounded-full border border-orange-200 shadow-sm animate-pulse">
+                                <Clock size={12} />
+                                <span className="text-[10px] font-bold uppercase tracking-wider">{pendingSyncCount} Pendientes</span>
+                            </div>
+                        )}
                     </div>
                 }
             />
 
-            <div className="bg-white border border-zinc-200 rounded-3xl p-8 animate-in fade-in duration-500 shadow-sm">
+            <div className="bg-white border border-zinc-200 rounded-3xl p-4 md:p-8 animate-in fade-in duration-500 shadow-sm">
                 <h2 className="text-lg font-bold mb-6 flex items-center gap-2 text-zinc-900 tracking-tight">
                     <CheckCircle2 className="text-zinc-900" size={20} /> Tareas Pendientes
                 </h2>
@@ -204,10 +436,10 @@ export function OperationsMyTasks() {
                             const ticketId = proc?.reference_id || '---';
 
                             return (
-                                <div key={wi.id} className="group p-5 bg-white border border-zinc-200 rounded-2xl flex items-center justify-between hover:shadow-md hover:border-zinc-300 transition-all">
-                                    <div className="flex gap-5 items-center flex-1">
+                                <div key={wi.id} className="group p-5 bg-white border border-zinc-200 rounded-2xl flex flex-col md:flex-row md:items-center justify-between hover:shadow-md hover:border-zinc-300 transition-all gap-4 w-full max-w-full overflow-hidden">
+                                    <div className="flex gap-4 items-start md:items-center flex-1 min-w-0 w-full">
                                         <div className={clsx(
-                                            "w-10 h-10 rounded-lg flex items-center justify-center font-bold text-sm shrink-0 border",
+                                            "w-10 h-10 rounded-lg flex items-center justify-center font-bold text-sm shrink-0 border mt-1 md:mt-0",
                                             (proc?.metadata?.current_level ?? 1) > 2
                                                 ? "bg-red-50 text-red-600 border-red-100"
                                                 : "bg-zinc-50 text-zinc-700 border-zinc-100"
@@ -215,23 +447,68 @@ export function OperationsMyTasks() {
                                             {proc?.metadata?.current_level ?? 1}
                                         </div>
                                         <div className="flex-1 min-w-0">
-                                            <h4 className="font-bold uppercase text-sm truncate pr-4 text-zinc-900">
-                                                {proc?.title || 'Sin Título'}
-                                            </h4>
+                                            <div className="flex items-center gap-2 flex-wrap">
+                                                <h4 className="font-bold uppercase text-xs md:text-sm truncate text-zinc-900 flex-1 min-w-0">
+                                                    {proc?.title || 'Sin Título'}
+                                                </h4>
 
-                                            <p className="text-xs text-zinc-500 mt-1 truncate">
-                                                <span className="font-bold text-zinc-800">Ticket: </span> #{ticketId}
-                                                <span className="mx-2 text-zinc-300">|</span>
-                                                <span className="font-bold text-zinc-800">Cliente: </span>
-                                                <span className="text-zinc-600 font-bold uppercase">{proc?.metadata?.nombre_cliente || 'Desconocido'}</span>
+                                                {/* BOTÓN DE EXPANSIÓN (+) */}
+                                                <button
+                                                    onClick={() => toggleTicketExpansion(wi.id)}
+                                                    className={clsx(
+                                                        "p-1 rounded-md transition-all flex items-center justify-center border",
+                                                        expandedTickets.has(wi.id)
+                                                            ? "bg-zinc-900 border-zinc-900 text-white rotate-90"
+                                                            : "bg-zinc-50 border-zinc-200 text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900"
+                                                    )}
+                                                    title={expandedTickets.has(wi.id) ? "Ver menos" : "Ver más detalles"}
+                                                >
+                                                    {expandedTickets.has(wi.id) ? <X size={12} strokeWidth={3} /> : <ChevronRight size={12} strokeWidth={3} />}
+                                                </button>
+                                            </div>
+
+                                            <p className="text-xs text-zinc-500 mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
+                                                <span className="whitespace-nowrap"><span className="font-bold text-zinc-800">TK-</span>{ticketId}</span>
+                                                <span className="text-zinc-300 hidden md:inline">|</span>
+                                                <span className="font-bold text-zinc-800 uppercase truncate">
+                                                    {proc?.metadata?.nombre_cliente || 'Desconocido'}
+                                                </span>
                                             </p>
+
+                                            {/* PANEL DE DETALLE EXPANDIDO */}
+                                            {expandedTickets.has(wi.id) && (
+                                                <div className="mt-3 p-3 bg-zinc-50/50 rounded-xl border border-zinc-100 space-y-2 animate-in slide-in-from-top-1 duration-200">
+                                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                                        <div className="flex items-center gap-2 text-[10px]">
+                                                            <MapPin size={12} className="text-zinc-400 shrink-0" />
+                                                            <span className="text-zinc-500 font-bold uppercase tracking-tight">Dirección:</span>
+                                                            <span className="text-zinc-700 font-medium truncate italic">{proc?.metadata?.direccion || 'N/A'}</span>
+                                                        </div>
+                                                        <div className="flex items-center gap-2 text-[10px]">
+                                                            <Package size={12} className="text-zinc-400 shrink-0" />
+                                                            <span className="text-zinc-500 font-bold uppercase tracking-tight">Barrio:</span>
+                                                            <span className="text-zinc-700 font-medium truncate">{proc?.metadata?.barrio || 'N/A'}</span>
+                                                        </div>
+                                                        <div className="flex items-center gap-2 text-[10px]">
+                                                            <MessageSquare size={12} className="text-zinc-400 shrink-0" />
+                                                            <span className="text-zinc-500 font-bold uppercase tracking-tight">Tel:</span>
+                                                            <span className="text-zinc-700 font-medium">{proc?.metadata?.telefono || proc?.metadata?.celular || 'N/A'}</span>
+                                                        </div>
+                                                        <div className="flex items-center gap-2 text-[10px]">
+                                                            <RefreshCw size={12} className="text-zinc-400 shrink-0" />
+                                                            <span className="text-zinc-500 font-bold uppercase tracking-tight">IP:</span>
+                                                            <code className="bg-zinc-200/50 text-zinc-800 px-1.5 py-0.5 rounded font-mono font-bold">{proc?.metadata?.ip || '0.0.0.0'}</code>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            )}
 
                                             <p className="text-[10px] text-muted-foreground mt-1 truncate">
                                                 <span className="font-bold">Asunto: </span>
                                                 {proc?.metadata?.asunto || 'No especificado'}
                                             </p>
 
-                                            <div className="flex items-center gap-3 mt-2.5">
+                                            <div className="flex items-center gap-2 mt-2.5 flex-wrap">
                                                 <span className="text-[9px] font-bold px-2 py-1 rounded-md uppercase bg-zinc-100 text-zinc-600 border border-zinc-200 tracking-wide">
                                                     {wi.workflow_activities?.name || 'SOPORTE'}
                                                 </span>
@@ -281,25 +558,63 @@ export function OperationsMyTasks() {
                                             </div>
                                         </div>
                                     </div>
-                                    <div className="flex gap-2">
-                                        <button
-                                            onClick={() => {
-                                                const currentPriorityStr = wi.workflow_activities?.workflow_processes?.priority || 'Media';
-                                                const pMap: Record<string, number> = { "Baja": 1, "Normal": 2, "Media": 2, "Alta": 3, "Muy Alta": 4 };
-                                                setPriority(pMap[currentPriorityStr] || 2);
-                                                setSelectedTask(wi);
-                                                setActionType('escalate');
-                                            }}
-                                            className="px-4 py-2.5 bg-zinc-50 border border-zinc-200 text-zinc-600 hover:bg-zinc-100 hover:border-zinc-300 rounded-xl text-[10px] font-bold uppercase transition-all shadow-sm"
-                                        >
-                                            Escalar
-                                        </button>
+                                    <div className="flex gap-2 w-full md:w-auto overflow-x-auto pb-2 md:pb-0 scrollbar-hide snap-x">
+                                        {/* Botón de Inicio si no ha empezado */}
+                                        {!timelineStatus[ticketId]?.started && (
+                                            <button
+                                                onClick={() => handleStartWork(ticketId)}
+                                                className="px-3 py-2 bg-emerald-50 text-emerald-600 border border-emerald-100 hover:bg-emerald-100 rounded-xl text-[10px] font-bold uppercase transition-all flex items-center gap-1.5 shrink-0"
+                                                title="Marcar Inicio de Trabajo"
+                                            >
+                                                <Play size={12} fill="currentColor" /> Iniciar
+                                            </button>
+                                        )}
+
+                                        {/* Botón de Llegada si ya inició pero no ha llegado */}
+                                        {timelineStatus[ticketId]?.started && !timelineStatus[ticketId]?.arrived && (
+                                            <button
+                                                onClick={() => handleArrival(ticketId)}
+                                                className="px-3 py-2 bg-blue-50 text-blue-600 border border-blue-100 hover:bg-blue-100 rounded-xl text-[10px] font-bold uppercase transition-all flex items-center gap-1.5 shrink-0"
+                                                title="Reportar Llegada al sitio"
+                                            >
+                                                <MapPin size={12} fill="currentColor" /> Llegada
+                                            </button>
+                                        )}
+
+                                        {/* RBAC: Permisos Gestionados */}
+                                        {canEditTicket(userProfile, wi) && (
+                                            <button
+                                                onClick={() => {
+                                                    setSelectedTask(wi);
+                                                    setIsEditModalOpen(true);
+                                                }}
+                                                className="px-4 py-2.5 bg-zinc-50 border border-zinc-200 text-zinc-600 hover:bg-zinc-100 hover:border-zinc-300 rounded-xl text-[10px] font-bold uppercase transition-all shadow-sm flex items-center gap-2 shrink-0"
+                                            >
+                                                Editar
+                                            </button>
+                                        )}
+
+                                        {canEscalateTicket(userProfile, wi) && (
+                                            <button
+                                                onClick={() => {
+                                                    const currentPriorityStr = wi.workflow_activities?.workflow_processes?.priority || 'Media';
+                                                    const pMap: Record<string, number> = { "Baja": 1, "Normal": 2, "Media": 2, "Alta": 3, "Muy Alta": 4 };
+                                                    setPriority(pMap[currentPriorityStr] || 2);
+                                                    setSelectedTask(wi);
+                                                    setActionType('escalate');
+                                                }}
+                                                className="px-4 py-2.5 bg-zinc-50 border border-zinc-200 text-zinc-600 hover:bg-zinc-100 hover:border-zinc-300 rounded-xl text-[10px] font-bold uppercase transition-all shadow-sm shrink-0"
+                                            >
+                                                Escalar
+                                            </button>
+                                        )}
+
                                         <button
                                             onClick={() => {
                                                 setSelectedTask(wi);
                                                 setActionType('complete');
                                             }}
-                                            className="px-5 py-2.5 bg-zinc-900 hover:bg-black text-white rounded-xl text-[10px] font-bold shadow-sm hover:shadow-lg hover:shadow-zinc-900/10 flex items-center gap-2 active:scale-95 transition-all uppercase tracking-wide"
+                                            className="px-5 py-2.5 bg-zinc-900 hover:bg-black text-white rounded-xl text-[10px] font-bold shadow-sm hover:shadow-lg hover:shadow-zinc-900/10 flex items-center gap-2 active:scale-95 transition-all uppercase tracking-wide shrink-0 ml-auto md:ml-0"
                                         >
                                             Finalizar <ChevronRight size={14} />
                                         </button>
@@ -314,8 +629,8 @@ export function OperationsMyTasks() {
             {/* Modal de Gestión */}
             {selectedTask && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-zinc-900/40 backdrop-blur-sm animate-in fade-in duration-200">
-                    <div className="bg-white border border-zinc-200 w-full max-w-lg rounded-2xl shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200">
-                        <div className="p-5 border-b border-zinc-100 flex justify-between items-center bg-white">
+                    <div className="bg-white border border-zinc-200 w-full max-w-2xl max-h-[90vh] rounded-2xl shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200 flex flex-col">
+                        <div className="p-5 border-b border-zinc-100 flex justify-between items-center bg-white shrink-0">
                             <div>
                                 <h3 className="text-base font-bold uppercase flex items-center gap-2 text-zinc-900 tracking-tight">
                                     {actionType === 'complete' ? <CheckCircle2 className="text-emerald-600" size={18} /> : <AlertTriangle className="text-orange-500" size={18} />}
@@ -330,63 +645,159 @@ export function OperationsMyTasks() {
                             </button>
                         </div>
 
-                        <div className="p-6 space-y-5 bg-white">
-                            <div className="space-y-1.5">
-                                <label className="text-[10px] font-bold text-zinc-500 uppercase flex items-center gap-2 tracking-wide">
-                                    <MessageSquare size={12} />
-                                    {actionType === 'complete' ? 'Detalle de la solución' : 'Motivo del escalamiento'}
+                        <div className="p-6 space-y-6 bg-white overflow-y-auto">
+                            {/* Materiales Frecuentes - Solo en Finalizar */}
+                            {actionType === 'complete' && (
+                                <div className="space-y-4">
+                                    <div className="flex items-center justify-between">
+                                        <label className="text-[11px] font-black text-zinc-800 uppercase flex items-center gap-2 tracking-widest">
+                                            <Package size={14} className="text-zinc-400" />
+                                            Materiales Utilizados
+                                        </label>
+                                        <div className="flex items-center gap-2">
+                                            <button
+                                                onClick={() => {
+                                                    // Buscamos materiales comunes en el stock
+                                                    const kit: Record<string, number> = {};
+                                                    const ont = technicianStock.find(a => a.inventory_items?.name?.toLowerCase().includes('ont'));
+                                                    const router = technicianStock.find(a => a.inventory_items?.name?.toLowerCase().includes('router'));
+                                                    const cable = technicianStock.find(a => a.inventory_items?.name?.toLowerCase().includes('cable') || a.inventory_items?.name?.toLowerCase().includes('drop'));
+
+                                                    if (ont) kit[ont.id] = 1;
+                                                    if (router) kit[router.id] = 1;
+                                                    if (cable) kit[cable.id] = 120; // Default reasonable amount
+
+                                                    setSelectedMaterials({ ...selectedMaterials, ...kit });
+                                                }}
+                                                className="text-[9px] font-black text-blue-600 uppercase bg-blue-50 hover:bg-blue-100 px-3 py-1 rounded-full border border-blue-100 transition-all active:scale-95"
+                                            >
+                                                + Kit Instalación
+                                            </button>
+                                            <span className="text-[9px] font-bold text-zinc-400 uppercase bg-zinc-50 px-2 py-1 rounded border border-zinc-100">Stock Técnico</span>
+                                        </div>
+                                    </div>
+
+                                    <MaterialSelector
+                                        stock={technicianStock}
+                                        selectedMaterials={selectedMaterials}
+                                        onChange={setSelectedMaterials}
+                                    />
+                                </div>
+                            )}
+
+                            <div className="space-y-2">
+                                <label className="text-[11px] font-black text-zinc-800 uppercase flex items-center gap-2 tracking-widest">
+                                    <MessageSquare size={14} className="text-zinc-400" />
+                                    {actionType === 'complete' ? 'Reporte Técnico' : 'Motivo del escalamiento'}
                                 </label>
+
+                                {actionType === 'complete' && (
+                                    <div className="flex bg-zinc-100 p-1 rounded-xl gap-1 w-fit">
+                                        <button
+                                            onClick={() => setFinalStatus(3)}
+                                            className={clsx(
+                                                "px-4 py-1 rounded-lg text-[8px] font-black uppercase tracking-wider transition-all",
+                                                finalStatus === 3
+                                                    ? "bg-blue-600 text-white shadow-md shadow-blue-500/20"
+                                                    : "text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50"
+                                            )}
+                                        >
+                                            Resuelto
+                                        </button>
+                                        <button
+                                            onClick={() => setFinalStatus(4)}
+                                            className={clsx(
+                                                "px-4 py-1 rounded-lg text-[8px] font-black uppercase tracking-wider transition-all",
+                                                finalStatus === 4
+                                                    ? "bg-emerald-600 text-white shadow-md shadow-emerald-500/20"
+                                                    : "text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50"
+                                            )}
+                                        >
+                                            Cerrado
+                                        </button>
+                                    </div>
+                                )}
                                 <textarea
-                                    className="w-full h-32 bg-white border border-zinc-200 rounded-xl p-3 text-xs font-medium outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-50 transition-all resize-none placeholder:text-zinc-300 text-zinc-700"
-                                    placeholder={actionType === 'complete' ? 'Describe qué se hizo para solucionar el caso...' : 'Explica por qué estás escalando este caso...'}
+                                    className="w-full h-32 bg-zinc-50 border border-zinc-200 rounded-2xl p-4 text-xs font-medium outline-none focus:bg-white focus:border-zinc-900 focus:ring-4 focus:ring-zinc-100 transition-all resize-none placeholder:text-zinc-300 text-zinc-700 leading-relaxed"
+                                    placeholder={actionType === 'complete' ? 'Detalla la solución técnica aplicada...' : 'Explica el motivo del escalamiento...'}
                                     value={comment}
                                     onChange={(e) => setComment(e.target.value)}
                                     autoFocus
                                 />
                             </div>
 
-                            {/* Campo de evidencia (imagen) - COMÚN para ambos modales */}
-                            <div className="space-y-2">
-                                <label className="text-[10px] font-black text-muted-foreground uppercase">Evidencia (Foto opcional)</label>
-                                <input
-                                    type="file"
-                                    accept="image/*"
-                                    onChange={(e) => setEvidenceFile(e.target.files?.[0] || null)}
-                                    className="w-full text-[10px] file:mr-2 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-[10px] file:font-black file:bg-primary/10 file:text-primary hover:file:bg-primary/20 cursor-pointer"
-                                />
-                                {evidenceFile && (
-                                    <p className="text-[9px] text-muted-foreground flex items-center gap-1">
-                                        <CheckCircle2 size={10} className="text-primary" />
-                                        Archivo seleccionado: {evidenceFile.name}
-                                    </p>
-                                )}
+                            {/* Evidencias Múltiples */}
+                            <div className="space-y-4">
+                                <div className="flex items-center justify-between">
+                                    <label className="text-[11px] font-black text-zinc-800 uppercase flex items-center gap-2 tracking-widest">
+                                        <Camera size={14} className="text-zinc-400" />
+                                        Evidencias Fotográficas
+                                    </label>
+                                    <span className="text-[9px] font-bold text-zinc-400 uppercase bg-zinc-50 px-2 py-0.5 rounded border border-zinc-100">{evidenceFiles.length} de 5</span>
+                                </div>
+
+                                <div className="grid grid-cols-5 gap-3">
+                                    {/* Muestra de fotos seleccionadas */}
+                                    {evidenceFiles.map((_, idx) => (
+                                        <div key={idx} className="aspect-square bg-zinc-100 rounded-xl border border-zinc-200 relative group overflow-hidden">
+                                            <div className="absolute inset-0 flex items-center justify-center text-[10px] font-black text-zinc-400 bg-zinc-50">
+                                                IMG_{idx + 1}
+                                            </div>
+                                            <button
+                                                onClick={() => setEvidenceFiles(evidenceFiles.filter((_, i) => i !== idx))}
+                                                className="absolute top-1 right-1 p-1 bg-red-500 text-white rounded-md opacity-0 group-hover:opacity-100 transition-opacity"
+                                            >
+                                                <Trash2 size={10} />
+                                            </button>
+                                            {idx === 0 && (
+                                                <div className="absolute bottom-0 left-0 right-0 bg-emerald-500/90 text-white text-[8px] font-black py-0.5 px-1 uppercase tracking-tighter text-center">PRINCIPAL</div>
+                                            )}
+                                        </div>
+                                    ))}
+
+                                    {evidenceFiles.length < 5 && (
+                                        <label className="aspect-square bg-zinc-50 border-2 border-dashed border-zinc-200 rounded-xl flex flex-col items-center justify-center cursor-pointer hover:bg-zinc-100 hover:border-zinc-300 transition-all group">
+                                            <input
+                                                type="file"
+                                                className="hidden"
+                                                accept="image/*"
+                                                multiple
+                                                onChange={(e) => {
+                                                    const files = Array.from(e.target.files || []);
+                                                    setEvidenceFiles([...evidenceFiles, ...files].slice(0, 5));
+                                                }}
+                                            />
+                                            <Camera size={16} className="text-zinc-300 group-hover:text-zinc-500 transition-colors" />
+                                            <span className="text-[8px] font-black text-zinc-400 group-hover:text-zinc-600 mt-1 uppercase">Añadir</span>
+                                        </label>
+                                    )}
+                                </div>
                             </div>
 
                             {actionType === 'escalate' && (
-                                <div className="space-y-4">
+                                <div className="grid grid-cols-2 gap-4">
                                     <div className="space-y-2">
-                                        <label className="text-[10px] font-black text-muted-foreground uppercase">Nueva Prioridad</label>
+                                        <label className="text-[11px] font-black text-zinc-800 uppercase tracking-widest">Prioridad</label>
                                         <select
                                             value={priority}
                                             onChange={(e) => setPriority(Number(e.target.value))}
-                                            className="w-full bg-background border border-border rounded-xl px-3 py-2 text-xs font-bold outline-none focus:ring-2 focus:ring-primary"
+                                            className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-4 py-3 text-xs font-bold outline-none focus:bg-white focus:border-zinc-900 transition-all font-bold uppercase tracking-wide"
                                         >
-                                            <option value={1}>BAJA</option>
-                                            <option value={2}>NORMAL</option>
-                                            <option value={3}>ALTA</option>
-                                            <option value={4}>MUY ALTA</option>
+                                            <option value={1}>1 - BAJA</option>
+                                            <option value={2}>2 - NORMAL</option>
+                                            <option value={3}>3 - ALTA</option>
+                                            <option value={4}>4 - CRÍTICA</option>
                                         </select>
                                     </div>
 
                                     <div className="space-y-2">
-                                        <label className="text-[10px] font-black text-muted-foreground uppercase flex items-center gap-2">
-                                            <AlertTriangle size={14} className="text-orange-500" />
+                                        <label className="text-[11px] font-black text-zinc-800 uppercase tracking-widest inline-flex items-center gap-2">
                                             Reasignar a
                                         </label>
                                         <select
                                             value={targetTechnician}
                                             onChange={(e) => setTargetTechnician(e.target.value)}
-                                            className="w-full bg-background border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary outline-none appearance-none font-bold"
+                                            className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-4 py-3 text-xs font-bold outline-none focus:bg-white focus:border-zinc-900 transition-all font-bold uppercase tracking-wide truncate"
                                         >
                                             <option value="">Seleccionar responsable...</option>
                                             {(() => {
@@ -394,22 +805,11 @@ export function OperationsMyTasks() {
                                                 let targetLevel = currentLevel + 1;
                                                 if (currentLevel === 0 || currentLevel === 1) targetLevel = 2;
 
-                                                console.log('[DEBUG FILTRO] Level actual:', currentLevel, '-> Level destino:', targetLevel);
-                                                console.log('[DEBUG FILTRO] Total usuarios antes de filtrar:', platformUsers.length);
-
-                                                const filtered = platformUsers.filter(u => {
-                                                    const match = Number(u.operational_level) === targetLevel;
-                                                    if (!match) {
-                                                        console.log('[DEBUG FILTRO] Descartado:', u.full_name, 'nivel:', u.operational_level, 'esperado:', targetLevel);
-                                                    }
-                                                    return match;
-                                                });
-
-                                                console.log('[DEBUG FILTRO] Usuarios filtrados:', filtered.length, filtered.map(u => u.full_name));
+                                                const filtered = platformUsers.filter(u => Number(u.operational_level) === targetLevel);
 
                                                 return filtered.map(u => (
                                                     <option key={u.id} value={u.id}>
-                                                        {u.full_name} ({u.wisphub_id || 'Sin ID'})
+                                                        {u.full_name} ({u.operational_role || 'SOPORTE'})
                                                     </option>
                                                 ));
                                             })()}
@@ -419,22 +819,225 @@ export function OperationsMyTasks() {
                             )}
 
                             <button
-                                disabled={!comment.trim() || processing}
-                                onClick={handleAction}
+                                disabled={(() => {
+                                    if (processing) return true;
+                                    if (!comment.trim()) return true;
+                                    if (actionType === 'complete') {
+                                        const asunto = selectedTask?.workflow_activities?.workflow_processes?.metadata?.asunto?.toUpperCase() || '';
+                                        let req = REQUIREMENTS.DEFAULT;
+                                        for (const key in REQUIREMENTS) {
+                                            if (asunto.includes(key)) req = REQUIREMENTS[key];
+                                        }
+                                        if (evidenceFiles.length < req.minPhotos) return true;
+                                        if (req.requiresMaterials && Object.keys(selectedMaterials).length === 0) return true;
+                                    }
+                                    return false;
+                                })()}
+                                onClick={async () => {
+                                    setProcessing(true);
+                                    try {
+                                        let success = false;
+                                        const ticketId = selectedTask.workflow_activities?.workflow_processes?.reference_id;
+                                        const materialList = actionType === 'complete' ? Object.entries(selectedMaterials).map(([id, qty]) => ({
+                                            asset_id: id,
+                                            quantity: qty
+                                        })) : [];
+
+                                        if (actionType === 'complete') {
+                                            // 1. Intentar Registro Directo
+                                            try {
+                                                if (materialList.length > 0) {
+                                                    await WorkflowService.trackMaterialConsumption(ticketId, materialList);
+                                                }
+
+                                                // --- CONVERSIÓN DE IMÁGENES & MARCA DE AGUA ---
+                                                // Procesar todas las fotos para asegurar que sean JPEG y WispHub no las rechace
+                                                const processedFiles: Blob[] = [];
+                                                if (evidenceFiles.length > 0) {
+                                                    dispatchToast("Procesando fotos...", "loading", "Aplicando marca de agua y optimizando JPEG", "image-proc");
+                                                    
+                                                    // Capturar ubicación si es posible
+                                                    let location: { lat: number, lng: number } | undefined;
+                                                    try {
+                                                        const pos: any = await new Promise((res, rej) => {
+                                                            navigator.geolocation.getCurrentPosition(res, rej, { timeout: 5000 });
+                                                        });
+                                                        location = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+                                                        console.log("[Watermark] Ubicación capturada para marca de agua:", location);
+                                                    } catch (locErr) {
+                                                        console.warn("[Watermark] No se pudo obtener ubicación GPS:", locErr);
+                                                    }
+
+                                                    const watermarkMeta: ImageMetadata = {
+                                                        company: 'RAPILINK SAS',
+                                                        technician: userProfile?.full_name || 'TÉCNICO',
+                                                        location,
+                                                        timestamp: new Date().toLocaleString()
+                                                    };
+
+                                                    for (const file of evidenceFiles) {
+                                                        try {
+                                                            const jpegBlob = await convertToJpeg(file, 2000, 0.8, watermarkMeta);
+                                                            processedFiles.push(jpegBlob);
+                                                        } catch (err) {
+                                                            console.error("Error convirtiendo imagen:", err);
+                                                            processedFiles.push(file); // Fallback al original si falla
+                                                        }
+                                                    }
+                                                    dispatchToast("Fotos listas ✅", "success", "Imágenes con marca de agua y optimizadas", "image-proc");
+                                                }
+
+                                                success = await WorkflowService.completeAndSyncWorkItem(selectedTask.id, comment, {
+                                                    files: processedFiles,
+                                                    statusId: finalStatus
+                                                });
+
+                                                if (success) {
+                                                    // Limpiar borrador al finalizar con éxito
+                                                    await draftService.clearDraft(String(ticketId));
+                                                }
+                                            } catch (e) {
+                                                console.warn('[MyTasks] 📡 Falla de red detectada, moviendo a cola...');
+                                                success = false;
+                                            }
+
+                                            if (!success) {
+                                                // 2. Mover a Cola si falla (Resiliencia)
+                                                await syncQueueService.addToQueue({
+                                                    id: ticketId,
+                                                    type: 'COMPLETE',
+                                                    data: {
+                                                        workItemId: selectedTask.id,
+                                                        resolution: comment,
+                                                        files: evidenceFiles,
+                                                        materials: materialList,
+                                                        statusId: finalStatus
+                                                    },
+                                                    timestamp: Date.now(),
+                                                    attempts: 0
+                                                });
+                                                setPendingSyncCount(prev => prev + 1);
+                                                success = true; // Marcamos como "éxito local" para cerrar el modal
+                                            }
+
+                                            // 3. Limpiar Timeline local siempre
+                                            const newTimeline = { ...timelineStatus };
+                                            delete newTimeline[ticketId];
+                                            saveTimeline(newTimeline);
+
+                                        } else {
+                                            // Lógica de Escalamiento Simétrica
+                                            try {
+                                                success = await WorkflowService.escalateWorkItem(selectedTask.id, comment, targetTechnician || undefined, {
+                                                    priority: priority,
+                                                    file: evidenceFiles[0]
+                                                });
+                                            } catch (e) {
+                                                success = false;
+                                            }
+
+                                            if (!success) {
+                                                await syncQueueService.addToQueue({
+                                                    id: ticketId,
+                                                    type: 'ESCALATE',
+                                                    data: {
+                                                        workItemId: selectedTask.id,
+                                                        resolution: comment,
+                                                        files: [evidenceFiles[0]],
+                                                        targetTechnicianId: targetTechnician || undefined,
+                                                        priority: priority
+                                                    },
+                                                    timestamp: Date.now(),
+                                                    attempts: 0
+                                                });
+                                                setPendingSyncCount(prev => prev + 1);
+                                                success = true;
+                                            }
+                                        }
+
+                                        if (success) {
+                                            setSelectedTask(null);
+                                            setComment('');
+                                            setEvidenceFiles([]);
+                                            setSelectedMaterials({});
+                                            await loadMyTasks();
+                                        }
+                                    } finally {
+                                        setProcessing(false);
+                                    }
+                                }}
                                 className={clsx(
-                                    "w-full py-3.5 rounded-xl font-bold uppercase text-xs flex items-center justify-center gap-2 transition-all shadow-sm",
+                                    "w-full py-4 rounded-2xl font-black uppercase text-xs flex items-center justify-center gap-3 transition-all shadow-xl tracking-widest",
                                     actionType === 'complete'
-                                        ? "bg-zinc-900 text-white hover:bg-black hover:shadow-lg hover:shadow-zinc-900/10"
-                                        : "bg-orange-500 text-white hover:bg-orange-600 shadow-orange-500/20",
+                                        ? "bg-zinc-900 text-white hover:bg-black hover:shadow-zinc-900/30"
+                                        : "bg-orange-500 text-white hover:bg-orange-600 shadow-orange-500/30",
                                     (!comment.trim() || processing) && "opacity-50 cursor-not-allowed scale-95"
                                 )}
                             >
-                                {processing ? 'Procesando...' : 'Confirmar Acción'}
+                                {processing ? (
+                                    <> <RefreshCw size={16} className="animate-spin" /> Procesando... </>
+                                ) : (
+                                    <>
+                                        {(() => {
+                                            if (actionType !== 'complete') return 'Confirmar Escalamiento';
+
+                                            const asunto = selectedTask?.workflow_activities?.workflow_processes?.metadata?.asunto?.toUpperCase() || '';
+                                            let req = REQUIREMENTS.DEFAULT;
+                                            for (const key in REQUIREMENTS) {
+                                                if (asunto.includes(key)) req = REQUIREMENTS[key];
+                                            }
+
+                                            if (evidenceFiles.length < req.minPhotos) return `Faltan Fotos (${evidenceFiles.length}/${req.minPhotos})`;
+                                            if (req.requiresMaterials && Object.keys(selectedMaterials).length === 0) return 'Reportar Materiales';
+
+                                            return 'Finalizar Tarea';
+                                        })()}
+                                    </>
+                                )}
                             </button>
                         </div>
                     </div>
                 </div>
             )}
+
+            {/* Modal de Edición (Restaurado) */}
+            {isEditModalOpen && selectedTask && (() => {
+                const proc = selectedTask.workflow_activities?.workflow_processes;
+                const metadata = proc?.metadata || {};
+
+                // Mapeo robusto de prioridad y estado (de string a ID)
+                const pMap: Record<string, number> = { "Baja": 1, "Normal": 2, "Media": 2, "Alta": 3, "Muy Alta": 4 };
+                const eMap: Record<string, number> = { "Abierto": 1, "En Progreso": 2, "Resuelto": 3, "Cerrado": 4 };
+
+                const ticketData = {
+                    id: proc?.reference_id,
+                    asunto: metadata.asunto || proc?.title || '',
+                    id_prioridad: metadata.id_prioridad || metadata.prioridad_id || pMap[proc?.priority as string] || pMap[metadata.prioridad] || 2,
+                    id_estado: metadata.id_estado || metadata.estado_id || eMap[metadata.estado] || 1,
+                    tecnico_id: metadata.tecnico?.id || metadata.tecnico_id || '',
+                    tecnico_usuario: metadata.tecnico_usuario || '',
+                    nombre_tecnico: metadata.nombre_tecnico || '',
+                    descripcion: metadata.descripcion || '',
+                    fecha_estimada_inicio: metadata.fecha_estimada_inicio || '',
+                    fecha_estimada_fin: metadata.fecha_estimada_fin || '',
+                    nombre_cliente: metadata.nombre_cliente || 'Desconocido'
+                };
+
+                return (
+                    <EditTicketModal
+                        onClose={() => {
+                            setIsEditModalOpen(false);
+                            setSelectedTask(null);
+                        }}
+                        ticket={ticketData}
+                        onUpdate={() => {
+                            setIsEditModalOpen(false);
+                            setSelectedTask(null);
+                            loadMyTasks();
+                        }}
+                    />
+                );
+            })()}
         </div>
     );
 }

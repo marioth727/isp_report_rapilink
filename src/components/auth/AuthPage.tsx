@@ -1,5 +1,5 @@
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { supabase } from '../../lib/supabase';
 
 export function AuthPage() {
@@ -7,6 +7,13 @@ export function AuthPage() {
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
     const [message, setMessage] = useState('');
+
+    useEffect(() => {
+        // PURGA AUTOMÁTICA: Si llegamos a la pantalla de login, limpiamos cualquier rastro corrupto
+        localStorage.removeItem('sb-rapilink-auth-token');
+        localStorage.removeItem('rapilink-auth-session');
+        supabase.auth.signOut().catch(() => { });
+    }, []);
 
     const handleAuth = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -20,6 +27,7 @@ export function AuthPage() {
             });
             if (error) throw error;
         } catch (error: any) {
+            console.error("Auth Error:", error);
             setMessage(error.message);
         } finally {
             setLoading(false);

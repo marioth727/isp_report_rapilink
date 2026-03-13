@@ -148,10 +148,9 @@ const loadInstallationsTickets = async () => {
 4. **Logging para debugging**: Logs como `[Service] nombre_tecnico: undefined` fueron clave para detectar el problema. Mantener logs descriptivos en métodos críticos.
 
 5. **Variantes específicas para instalaciones**: El filtro de instalaciones usa solo **dos variantes** validadas en producción:
-   - `'instalaciones@rapilink-sas'` (email crudo cuando no está en caché)
-   - `'instalaciones aprobadas'` (variante de nombre mapeado)
+   - `'instalaciones@rapilink-sas'` (Usuario inmutable)
    
-   Estas dos variantes cubren todos los casos observados en el sistema WispHub real.
+   El sistema implementa **Normalización Automática en Servicio**: Si WispHub envía un ticket sin `tecnico_usuario`, el mapeador (`mapTicket`) consulta el espejo del staff y restaura el usuario inmutable basándose en el nombre o correo del técnico.
 
 ### Referencias de Código
 
@@ -163,11 +162,14 @@ const loadInstallationsTickets = async () => {
 
 > [!CRITICAL]
 > **Fecha**: 2026-02-02  
-> **Contexto**: Sincronización de Mapa con Filtros en `OperationsDispatch.tsx`
+> - [x] Analizar el código del filtro de instalaciones en `OperationsDispatch.tsx` y explicar la lógica.
+> - [x] Diagnosticar por qué el ticket #68247 no pasa el filtro (CAMPO `tecnico_usuario` ES `undefined` EN LA API).
+> - [x] Implementar **Mapeo Inmutable Automático** en `wisphub.ts`.
+- [x] Refactorizar `mapTicket` para restaurar el `tecnico_usuario` usando el espejo del staff (Zero-Trust API).
+- [x] Revertir lógica de interfaz en `OperationsDispatch.tsx` a chequeo estricto del usuario inmutable.
+- [x] Documentar solución definitiva en memoria técnica y walkthrough.
 
-### Problema Detectado
-
-Al implementar la sincronización visual entre el filtro de técnico y el mapa geográfico, se descubrió una **inconsistencia crítica en el origen de datos**:
+geográfico, se descubrió una **inconsistencia crítica en el origen de datos**:
 
 1. **Pool de tickets** usaba `filteredTickets` (datos post-filtrado)
 2. **Mapa (`ticketsByNeighborhood`)** usaba `tickets` (datos sin filtrar)
@@ -372,7 +374,7 @@ Se implementó una **separación estricta** entre la asignación de datos y la v
 Para mantener este comportamiento, el `useEffect` de carga inicial en `OperationsDispatch.tsx` **NO DEBE** mezclar los resultados de `WorkflowService.getTodayAssignments()`.
 
 ```typescript
-// ✅ CORRECTO (Manual Strict):
+// ✅ CORRECTO (Manual Strict):![alt text](image.png)
 if (technicians.length > 0) {
     setAssignedRoutes(prev => {
         // Solo carga lo que está en localStorage (draftRoutes)
@@ -389,3 +391,120 @@ if (technicians.length > 0) {
 Si alguna vez se requiere "resetear" la vista de despacho debido a un cambio de lógica, se debe rotar la clave de `localStorage`:
 - `dispatch_draft_schedule_v1` (Obsoleto - Mezclaba BD)
 - `dispatch_manual_strict_v1` (Actual - Solo Manual)
+
+## 10. Resiliencia API y Seguridad de Inventario
+
+> [!IMPORTANT]
+> **Fecha**: 2026-02-19
+> **Contexto**: Endurecimiento de la seguridad RLS y corrección de "falsos positivos" en errores de API.
+
+### 10.1. El Caso del 404 en `/asuntos-tickets`
+**Problema**: La consola mostraba errores 404 intermitentes al cargar la lista de asuntos.
+**Hallazgo**: La API de WispHub (basada en Django REST Framework) es inconsistente con el manejo de `TRAILING_SLASH`.
+- Algunos endpoints requieren barra final: `/asuntos-tickets/`
+- Otros fallan si la tienen: `/clientes`
+
+**Solución**: Se implementó una lógica de "Retry-with-slash" en `WisphubService.getTicketSubjects`.
+1.  Intenta `GET /asuntos-tickets` (sin barra).
+2.  Si recibe 404, reintenta automáticamente con `GET /asuntos-tickets/`.
+3.  Si ambos fallan, usa una lista estática de fallback (`TICKET_SUBJECTS`) para no bloquear la UI.
+
+### 10.2. Burbujas de Respuesta "Silenciosas"
+**Objetivo**: Registrar acciones en el historial del ticket (ej: "Técnico en camino") sin enviar correos molestos al cliente final.
+**Implementación**:
+El endpoint `/api/tickets/comentarios/` acepta un flag no documentado oficialmente pero funcional:
+```json
+{
+  "do_not_notify_client": true
+}
+```
+Esto permite crear "System Notes" o trazas de auditoría visibles para el staff pero invisibles/silenciosas para el usuario final.
+
+### 10.3. Seguridad RLS: Actas de Entrega
+Se implementó un modelo de seguridad estricto para el módulo de inventario (`inventory_delivery_slips`):
+
+1.  **Base de Datos (Postgres RLS)**:
+    -   `SELECT`: Permitido a usuarios autenticados (`auth.role() = 'authenticated'`).
+    -   `INSERT`: Permitido a usuarios autenticados.
+    -   **Restricción**: Un usuario estándar no puede borrar ni editar actas de otros, garantizando inmutabilidad legal.
+
+2.  **Storage (Supabase Storage)**:
+    -   Bucket: `delivery-acts`
+    -   Política `Give technicans access to own folder 1ok0g1_0`:
+        -   Permite `SELECT`, `INSERT` (Upload).
+        -   Path forzado: `(storage.foldername(name))[1] = 'delivery-acts'`.
+    -   Esto asegura que las firmas y fotos de evidencia sean accesibles para generar los PDFs pero protegidas de escritura pública.
+    -   Esto asegura que las firmas y fotos de evidencia sean accesibles para generar los PDFs pero protegidas de escritura pública.
+
+## 11. Optimización de Supervisión (Resolución QuotaExceededError)
+
+> [!CRITICAL]
+> **Fecha**: 2026-02-19
+> **Contexto**: Error crítico de almacenamiento ("QuotaExceededError") al intentar cachear 60 días de procesos operativos.
+
+### El Problema del Caché Local
+Inicialmente se implementó una estrategia `stale-while-revalidate` usando `localStorage` para dar una vista instantánea.
+*   **Fallo**: Un solo objeto JSON con 60 días de datos de `workflow_processes` (incluyendo actividades y workitems) excedía el límite de 5MB del navegador.
+*   **Síntoma**: Pantalla roja de error y fallo total de la aplicación al intentar guardar.
+
+### Solución: Carga Progresiva (Waterfall)
+Se eliminó por completo el caché persistente (`localStorage`) en favor de una estrategia de carga escalonada en `OperationsSupervision.tsx`:
+
+1.  **Carga Inicial Rápida**:
+    *   Se solicitan solo los **primeros 50 registros** (`.range(0, 49)`).
+    *   Esto garantiza un "First Contentful Paint" casi instantáneo sin saturar la memoria.
+
+2.  **Sincronización de Fondo**:
+    *   Inmediatamente después (`setTimeout`), se dispara una segunda consulta que trae el resto de los datos del rango de fechas seleccionado.
+    *   La UI se actualiza silenciosamente cuando llegan los datos completos.
+
+### Limpieza de Emergencia
+Para remediar los navegadores de usuarios que ya tenían el error atrapado, se implementó una rutina de **sanitización al montaje**:
+```typescript
+// OperationsSupervision.tsx
+useEffect(() => {
+    // Purga proactiva de claves corruptas o gigantes
+    Object.keys(localStorage).forEach(key => {
+        if (key.startsWith('supervision_cache_')) {
+            localStorage.removeItem(key);
+        }
+    });
+    // ...
+}, []);
+```
+
+## 12. Normalización de Asuntos de Tickets (WispHub API vs BD Local)
+
+> [!CRITICAL]
+> **Fecha**: 2026-02-20
+> **Contexto**: Corrección de categorización estricta de tickets para métricas y reportes.
+
+### Formato Híbrido en `workflow_processes.title`
+Se descubrió que la sincronización de tickets desde WispHub almacena el Asunto del ticket concatenado con el Nombre del Cliente en el campo `title` de la base de datos local.
+- **Formato WispHub (Visual)**: `Instalacion Nueva`
+- **Formato Guardado (DB Local)**: `Instalacion Nueva - MARIO SABANAGRANDE`
+
+**Impacto Cero-Tolerancia en Categorización**:
+Al intentar aplicar reglas de macheo estricto (`subject === 'INSTALACION NUEVA'`) para agrupar analíticas de inventario y consumo, las comparaciones fallaban y los tickets caían por defecto en la categoría "ADMINISTRATIVO", ya que la cadena traía basura de texto al final.
+
+### Solución: Aislamiento del Asunto
+Para mantener la robustez sin caer en falsos positivos (usando un `.includes()` que podría clasificar erróneamente variaciones de texto), se pre-procesa la cadena cortando en el separador literal ` - ` antes de la evaluación estricta:
+
+```typescript
+// src/lib/inventoryAnalytics.ts
+export const categorizeTicket = (subject: string): TicketCategory => {
+    if (!subject) return 'ADMINISTRATIVO';
+    
+    // WispHub a menudo guarda "Asunto - Cliente". Cortamos aquí para obtener el asunto puro
+    const isolatedSubject = subject.includes(' - ') ? subject.split(' - ')[0] : subject;
+    
+    // Removemos acentos y pasamos a mayúsculas para una comparación estricta
+    const normalizedSubject = isolatedSubject.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().trim();
+
+    if (SUBJECTS_INSTALACION.includes(normalizedSubject)) return 'INSTALACION';
+    // ...resto de validaciones
+};
+```
+
+### Notas sobre Errores Tipográficos del Catálogo Origen
+Adicionalmente, se confirmó que el catálogo original de WispHub del ISP contiene y envía errores de tipeo en las opciones por defecto (ej. `"INSTATALACION NUEVA"` en lugar de Instalación). **Regla de oro**: El código local debe mapear y empatar exactamente esos errores de tipeo en los arrays de constantes si desea capturar correctamente los tickets históricos y presentes hasta que se corrija en el origen.

@@ -7,19 +7,24 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react()],
     server: {
+      port: 5173,
+      strictPort: false,
+      hmr: {
+        port: 5173,
+        host: 'localhost'
+      },
       proxy: {
         '/api/wisphub': {
           target: 'https://api.wisphub.io',
           changeOrigin: true,
+          secure: false, // OBLIGATORIO: El certificado de api.wisphub.io puede ser visto como expirado por Node
           rewrite: (path) => path.replace(/^\/api\/wisphub/, '/api'),
           configure: (proxy, _options) => {
             proxy.on('proxyReq', (proxyReq, _req, _res) => {
               const apiKey = env.VITE_WISPHUB_API_KEY || '';
+              // Solo dejamos la cabecera que confirmamos que funciona en el script standalone
               proxyReq.setHeader('Authorization', `Api-Key ${apiKey}`);
-              proxyReq.setHeader('Api-Key', apiKey);
-              proxyReq.setHeader('Origin', 'https://api.wisphub.io');
-              proxyReq.setHeader('Referer', 'https://api.wisphub.io/');
-              proxyReq.setHeader('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+              proxyReq.setHeader('Accept', 'application/json');
             });
           },
         },

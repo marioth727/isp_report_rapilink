@@ -1,5 +1,5 @@
 import { Activity, RefreshCw } from 'lucide-react';
-import { useState } from 'react';
+import React, { useState } from 'react';
 import { WorkflowService } from '../../lib/workflowService';
 import clsx from 'clsx';
 
@@ -25,14 +25,14 @@ export function OperationsHeader({ title, description, onSyncComplete, customAct
 
     return (
         <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-8 border-b border-zinc-100 pb-6">
-            <div className="flex flex-col gap-1">
-                <h1 className="text-2xl font-bold tracking-tight text-zinc-900 flex items-center gap-3">
+            <div className="flex flex-col gap-1 w-full md:w-auto">
+                <h1 className="text-xl md:text-2xl font-bold tracking-tight text-zinc-900 flex items-center gap-3">
                     <Activity className="text-zinc-900" size={24} />
                     {title}
                 </h1>
-                <p className="text-zinc-500 text-sm font-medium ml-9">{description}</p>
+                <p className="text-zinc-500 text-[10px] md:text-sm font-medium ml-9">{description}</p>
             </div>
-            <div className="flex gap-3 items-center ml-9 md:ml-0">
+            <div className="flex flex-wrap gap-2 items-center ml-9 md:ml-0">
                 {customAction}
                 <button
                     onClick={() => handleAutoSync(false)}

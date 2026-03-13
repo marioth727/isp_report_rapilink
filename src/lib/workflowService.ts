@@ -1,4 +1,4 @@
-import { supabase } from './supabase';
+import { supabase, safeGetUser } from './supabase';
 import { WisphubService, stripHtml } from './wisphub';
 import type { WorkflowProcess, WorkflowLog, ParticipantType, PlatformUser } from './types/workflow';
 
@@ -6,14 +6,26 @@ import type { WorkflowProcess, WorkflowLog, ParticipantType, PlatformUser } from
  * Normaliza un texto para comparaciones (minúsculas, sin espacios extras)
  */
 export const normalize = (text: string | null | undefined): string => {
-    if (!text) return '';
-    return text.toString().toLowerCase().trim()
-        .normalize("NFD").replace(/[\u0300-\u036f]/g, ""); // Quitar acentos opcionalmente
+    if (!text) return "";
+    return text.toString()
+        .toLowerCase()
+        .trim()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "") // Quitar acentos
+        .replace(/[^a-z0-9\s]/g, "")   // Quitar puntuación redundante
+        .replace(/\s+/g, " ");          // Colapsar espacios múltiples
 };
 
 // Helper to check for valid UUIDs
 const isUUID = (str: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
 
+// Requisitos por tipo de ticket
+export const REQUIREMENTS: Record<string, { minPhotos: number, requiresMaterials: boolean }> = {
+    'INSTALACION': { minPhotos: 3, requiresMaterials: true },
+    'REPARACION': { minPhotos: 2, requiresMaterials: false },
+    'MANTENIMIENTO': { minPhotos: 2, requiresMaterials: true },
+    'DEFAULT': { minPhotos: 1, requiresMaterials: false }
+};
 
 export const WorkflowService = {
     // --- PROCESOS ---
@@ -53,6 +65,148 @@ export const WorkflowService = {
             .eq('id', id)
             .single();
         return error ? null : data;
+    },
+
+    /**
+     * Recupera los tickets sincronizados desde WispHub que residen en Supabase (Espejo)
+     */
+    async getOperationalTicketsMirror(): Promise<any[]> {
+        const { data, error } = await supabase
+            .from('workflow_processes')
+            .select('metadata')
+            .eq('process_type', 'Ticket AXCES')
+            .eq('status', 'PE')
+            .order('updated_at', { ascending: false })
+            .limit(2500);
+
+        if (error) {
+            if (error.message?.includes('aborted') || (error as any).name === 'AbortError') {
+                console.warn('[WorkflowService] ⚠️ Petición de tickets espejo abortada');
+            } else {
+                console.error('[WorkflowService] Error recuperando tickets espejo:', error);
+            }
+            return [];
+        }
+
+        return (data || []).map(row => WisphubService.mapTicket(row.metadata));
+    },
+
+    /**
+     * Sincronización Stale-While-Revalidate ("El Detective")
+     * Purga en Supabase los tickets que en WispHub cambiaron de estado o de técnico sin notificar.
+     */
+    async silentDetectiveSync(options: { force?: boolean } = {}): Promise<void> {
+        if (!options.force && (window as any)._isDetectiveRunning) {
+            console.log('[Detective] ⏳ Ya hay una sincronización en curso. Esperando...');
+            return;
+        }
+        (window as any)._isDetectiveRunning = true;
+
+        try {
+            console.log('[Detective] 🕵️‍♂️ Iniciando purga/sincronización silenciosa de desajustes...');
+
+            // 1. Obtener todos los abiertos en Supabase (solo los activos para no procesar 8000 filas)
+            const { data: localOpenItems } = await supabase
+                .from('workflow_processes')
+                .select('id, metadata')
+                .eq('process_type', 'Ticket AXCES')
+                .eq('status', 'PE')
+                .in('metadata->>id_estado', ['1', '2', '5']); // Nuevo, En Progreso, Reagendado
+
+            if (!localOpenItems || localOpenItems.length === 0) {
+                console.log('[Detective] No hay tickets abiertos localmente. Nada que purgar.');
+                return;
+            }
+
+            console.log(`[Detective] Evaluando ${localOpenItems.length} tickets locales abiertos...`);
+
+            // 2. Obtener la fuente de verdad: Tickets Abiertos Reales de WispHub (Últimos 60 días)
+            const openInWispHub = await WisphubService.getAllTickets({ status: '1,2,5' });
+
+            // SEGURIDAD NACIONAL: Si WispHub devolvió 0 tickets o la red falló, 
+            // no podemos asumir que los tickets locales son fantasma. Ocurrió un error en la API.
+            if (!openInWispHub || openInWispHub.length === 0) {
+                console.warn('[Detective] ⚠️ WispHub retornó 0 tickets abiertos. Esto es matemáticamente improbable en producción o indica fallo de API (Error 500, Rate Limit). ABORTANDO purga de Supabase para no borrar datos valiosos!');
+                return;
+            }
+
+            // Crear mapa para búsqueda O(1)
+            const whTruthMap = new Map();
+            openInWispHub.forEach(t => whTruthMap.set(String(t.id), t));
+
+            let purges = 0;
+            let fixes = 0;
+
+            // Acumular cambios para aplicarlos en batch (NO en serie para no bloquear la conexión)
+            const toPurge: string[] = [];
+            const purgedMetas: any[] = [];
+            const toFix: Array<{ id: string; metadata: any }> = [];
+
+            // 3. Evaluar discrepancias
+            for (const local of localOpenItems) {
+                const localId = String(local.metadata.id);
+                const localTech = local.metadata.tecnico_usuario || '';
+                const truthTicket = whTruthMap.get(localId);
+
+                // CASO A: El ticket ya NO ESTÁ ABIERTO en WispHub
+                if (!truthTicket) {
+                    purges++;
+                    toPurge.push(local.id);
+                    purgedMetas.push({ id: local.id, metadata: { ...local.metadata, id_estado: 4, nombre_estado: 'Cerrado/Purgado por Detective' }, status: 'Completed' });
+                    continue;
+                }
+
+                // CASO B: El ticket SIGUE ABIERTO, pero le cambiaron el Técnico en WispHub
+                const truthTech = truthTicket.tecnico_usuario || '';
+                if (localTech !== truthTech) {
+                    fixes++;
+                    toFix.push({ id: local.id, metadata: { ...local.metadata, tecnico_usuario: truthTech, nombre_tecnico: truthTicket.nombre_tecnico } });
+                }
+            }
+
+            // 6. Aplicar cambios en Batch Controlado (Evita colapsar el navegador con miles de PATCH)
+            const CHUNK_SIZE = 15;
+
+            // Purga de tickets cerrados
+            if (purgedMetas.length > 0) {
+                console.log(`[Detective] 🧹 Purgando ${purgedMetas.length} tickets en lotes de ${CHUNK_SIZE}...`);
+                for (let i = 0; i < purgedMetas.length; i += CHUNK_SIZE) {
+                    const chunk = purgedMetas.slice(i, i + CHUNK_SIZE);
+                    await Promise.all(chunk.map((item: any) =>
+                        supabase.from('workflow_processes')
+                            .update({ metadata: item.metadata, status: 'Completed' })
+                            .eq('id', item.id)
+                    ));
+                    if (purgedMetas.length > 100 && i % (CHUNK_SIZE * 5) === 0) {
+                        console.log(`[Detective] Progreso purga: ${i}/${purgedMetas.length}...`);
+                    }
+                }
+            }
+
+            // Corrección de técnicos o metadatos
+            if (toFix.length > 0) {
+                console.log(`[Detective] 🛠 Corrigiendo ${toFix.length} tickets en lotes de ${CHUNK_SIZE}...`);
+                for (let i = 0; i < toFix.length; i += CHUNK_SIZE) {
+                    const chunk = toFix.slice(i, i + CHUNK_SIZE);
+                    await Promise.all(chunk.map(item =>
+                        supabase.from('workflow_processes')
+                            .update({ metadata: item.metadata })
+                            .eq('id', item.id)
+                    ));
+                }
+            }
+
+            if (purges > 0 || fixes > 0) {
+                console.log(`[Detective] 🕵️‍♂️ Sincronización Completada: ${purges} marcados cerrados, ${fixes} reasignados.`);
+            } else {
+                console.log('[Detective] Todo en orden. No hay desincronización.');
+            }
+
+        } catch (e) {
+            console.error('[Detective] Error al intentar reparar discrepancias:', e);
+        } finally {
+            (window as any)._isDetectiveRunning = false;
+        }
     },
 
     // --- ACTIVIDADES Y WORKITEMS ---
@@ -185,7 +339,7 @@ export const WorkflowService = {
             }
 
             // 2. Usar la lógica de reasignación existente
-            const { data: { user } } = await supabase.auth.getUser();
+            const { data: { user } } = await safeGetUser();
             return await this.reassignWorkItem(item.id, newParticipantId, user?.id || 'system');
         } catch (e) {
             console.error('[WorkflowService] Error en reassignPublishedTicket:', e);
@@ -240,8 +394,11 @@ export const WorkflowService = {
                 .select('id, full_name, email, role, wisphub_id, operational_level, is_field_tech');
 
             if (profilesError) {
-                console.error('[getPlatformUsers] ❌ Error obteniendo profiles:', profilesError);
-                // Si hay error, intentar retornar al menos un array vacío
+                if (profilesError.message?.includes('aborted') || (profilesError as any).name === 'AbortError') {
+                    console.warn('[getPlatformUsers] ⚠️ Petición abortada (probablemente por recarga de página)');
+                } else {
+                    console.error('[getPlatformUsers] ❌ Error obteniendo profiles:', profilesError);
+                }
                 return [];
             }
 
@@ -305,10 +462,15 @@ export const WorkflowService = {
     },
 
     async updateTicketStatus(ticketId: string, statusId: number, comment?: string, options: { file?: File | Blob } = {}) {
+        console.log('[updateTicketStatus] 🚀 Iniciando cierre de ticket:', { ticketId, statusId, hasComment: !!comment, hasFile: !!options.file });
         try {
             // 1. Obtener Datos Actuales para PUT limpio
             const rawTicket = await WisphubService.getTicketRaw(ticketId);
-            if (!rawTicket) return false;
+            if (!rawTicket) {
+                console.error('[updateTicketStatus] ❌ No se pudo obtener el ticket raw');
+                return false;
+            }
+            console.log('[updateTicketStatus] ✅ Ticket raw obtenido:', { asunto: rawTicket.asunto, tecnico: rawTicket.tecnico, estado: rawTicket.estado });
 
             // 2. Mapeo de IDs (PUT Estricto sin tocar descripción)
             const priorityMap: Record<string, number> = { "Baja": 1, "Normal": 2, "Media": 2, "Alta": 3, "Muy Alta": 4 };
@@ -342,11 +504,27 @@ export const WorkflowService = {
                 }
             }
 
-            const payload = {
+            const { data: { user } } = await safeGetUser();
+            let actorName = 'Sistema';
+            if (user) {
+                const { data: profile } = await supabase.from('profiles').select('full_name').eq('id', user.id).single();
+                actorName = profile?.full_name || user.email || 'Sistema';
+            }
+
+            const timestamp = new Date().toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short', timeZone: 'America/Bogota' }).replace(',', '');
+            const statusLabel = statusId === 3 ? "FINALIZADO" : "ACTUALIZADO";
+            const commentText = comment || `Ticket ${statusLabel.toLowerCase()}`;
+            const fancyComment = `==== ${statusLabel}: ${commentText} | Responsable: ${actorName.toUpperCase()} | ${timestamp} ====`;
+
+            // 5. Construir Payload Completo (PUT LIMPIO + descripción actualizada)
+            const cleanBase = stripHtml(rawTicket.descripcion || ".");
+            const updatedDesc = `${cleanBase}\n\n${fancyComment}`.trim();
+
+            const payload: any = {
                 servicio: rawTicket.servicio?.id_servicio || rawTicket.servicio?.id || rawTicket.servicio,
                 asunto: currentAsunto,
                 asuntos_default: safeAsunto,
-                descripcion: rawTicket.descripcion || ".",
+                descripcion: updatedDesc,
                 prioridad: priorityMap[rawTicket.prioridad] || 2,
                 estado: statusId,
                 tecnico: Number(finalTechId),
@@ -354,44 +532,43 @@ export const WorkflowService = {
                 departamentos_default: rawTicket.departamento || "Soporte Técnico"
             };
 
-            // 4. Registrar Trazabilidad en la Descripción (WispHub no tiene endpoint de comentarios)
-            if (comment) {
-                const { data: { user } } = await supabase.auth.getUser();
-                let actorName = 'Sistema';
-                if (user) {
-                    const { data: profile } = await supabase.from('profiles').select('full_name').eq('id', user.id).single();
-                    actorName = profile?.full_name || user.email || 'Sistema';
-                }
-
-                const timestamp = new Date().toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' }).replace(',', '');
-                const statusLabel = statusId === 3 ? "FINALIZADO" : "ACTUALIZADO";
-
-                const fancyComment = `==== TICKET ${statusLabel} | ${actorName.toUpperCase()} | Fecha: ${timestamp} | REPORTE: ${comment} ====`;
-
-                // Actualizar con nueva descripcion que incluye el bloque de trazabilidad
-                const cleanBase = stripHtml(rawTicket.descripcion || "");
-                const newDescription = `${cleanBase}\n\n${fancyComment}`.trim();
-
-                const payloadWithComment = {
-                    ...payload,
-                    descripcion: newDescription,
-                    archivo_ticket: options.file
-                };
-
-                return await WisphubService.updateTicket(ticketId, payloadWithComment, 'PUT');
+            // Inyectar fecha_fin si se está finalizando (Estado 3)
+            if (statusId === 3) {
+                const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Bogota' }));
+                const pad = (n: number) => n.toString().padStart(2, '0');
+                // Formato YYYY-MM-DD HH:MM:SS
+                payload.fecha_final = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+                console.log('[updateTicketStatus] 📅 Fecha final inyectada:', payload.fecha_final);
             }
 
-            // Si no hay comentario, solo actualizar el estado sin modificar descripción
-            return await WisphubService.updateTicket(ticketId, payload, 'PUT');
+            if (options.file) {
+                payload.archivo_ticket = options.file;
+                console.log('[updateTicketStatus] 📎 Archivo adjunto detectado');
+            }
+
+            console.log('[updateTicketStatus] 📦 Payload construido:', payload);
+
+            // 6. Actualizar ticket (Con descripción integrada y opcionalmente archivo)
+            console.log('[updateTicketStatus] 🔄 Actualizando ticket...');
+            const updateSuccess = await WisphubService.updateTicket(ticketId, payload, 'PUT');
+
+            if (!updateSuccess) {
+                console.error('[updateTicketStatus] ❌ Falló actualización de ticket');
+                return false;
+            }
+
+            console.log('[updateTicketStatus] 🏁 Operación completada exitosamente');
+            return true;
         } catch (e) {
-            console.error('[WispHub] Error in updateTicketStatus via Comments:', e);
+            console.error('[updateTicketStatus] 💥 ERROR FATAL:', e);
             return false;
         }
     },
 
-    async completeAndSyncWorkItem(workItemId: string, resolution: string, options: { file?: File | Blob } = {}) {
+    async completeAndSyncWorkItem(workItemId: string, resolution: string, options: { files?: (File | Blob)[], statusId?: number } = {}) {
         try {
-            // 1. Obtener detalles del item para saber el ticket_id
+            const finalStatusId = options.statusId || 4;
+            // 1. Obtener detalles del item
             const { data: item } = await supabase
                 .from('workflow_workitems')
                 .select('*, workflow_activities(workflow_processes(reference_id))')
@@ -402,23 +579,111 @@ export const WorkflowService = {
 
             const ticketId = item.workflow_activities?.workflow_processes?.reference_id;
 
-            // 2. Marcar TODOS los workitems de esta actividad como completados
+            // 2. Marcar workitem como completado localmente
             const { error: localError } = await supabase
                 .from('workflow_workitems')
                 .update({ status: 'SS' })
-                .eq('activity_id', item.activity_id);
+                .eq('id', workItemId);
 
             if (localError) throw localError;
 
-            // 3. Sincronizar con WispHub si hay ticket_id
+            // 3. Sincronizar con WispHub
             if (ticketId) {
-                // Estado 3 = Cerrado/Resuelto en WispHub
-                await this.updateTicketStatus(ticketId, 3, resolution, options);
+                const files = options.files || [];
+                const firstFile = files[0];
+                const extraFiles = files.slice(1);
+
+                // A. Foto principal y cierre (Ahora integrado en updateTicketStatus)
+                // Usamos una copia de la resolución que aumentaremos si hay fotos extras
+                let finalResolution = resolution;
+
+                // B. Evidencias adicionales en Supabase + HTML
+                if (extraFiles.length > 0) {
+                    const extraLinks: string[] = [];
+                    for (let i = 0; i < extraFiles.length; i++) {
+                        const file = extraFiles[i];
+                        const fileName = `tk_${ticketId}_ex_${i}_${Date.now()}.jpg`;
+                        const filePath = fileName;
+
+                        const { error: uploadError } = await supabase.storage
+                            .from('interaction-attachments')
+                            .upload(filePath, file, {
+                                cacheControl: '3600',
+                                upsert: true,
+                                contentType: 'image/jpeg'
+                            });
+
+                        if (!uploadError) {
+                            const { data: publicData } = supabase.storage
+                                .from('interaction-attachments')
+                                .getPublicUrl(filePath);
+
+                            if (publicData?.publicUrl) {
+                                extraLinks.push(publicData.publicUrl);
+                            }
+                        } else {
+                            console.error(`[Supabase Storage Error] ${fileName}:`, uploadError);
+                        }
+                    }
+
+                    if (extraLinks.length > 0) {
+                        const textLinks = extraLinks.map((url, idx) => `Evidencia #${idx + 2}:\n${url}`).join('\n\n');
+                        finalResolution = `${resolution}\n\n--- EVIDENCIAS ADICIONALES ---\n${textLinks}`;
+                    }
+                }
+
+                await this.updateTicketStatus(ticketId, finalStatusId, finalResolution, { file: firstFile });
             }
 
             return true;
         } catch (e) {
             console.error('Error in completeAndSync:', e);
+            return false;
+        }
+    },
+
+    async trackMaterialConsumption(ticketId: string, materials: { asset_id: string, quantity: number }[]) {
+        try {
+            const { data: { user } } = await safeGetUser();
+            if (!user) return false;
+
+            for (const mat of materials) {
+                // Registrar movimiento de consumo
+                await supabase.from('inventory_movements').insert({
+                    asset_id: mat.asset_id,
+                    origin_holder_id: user.id,
+                    movement_type: 'CONSUMO',
+                    quantity: mat.quantity,
+                    notes: `Consumido en Ticket #${ticketId}`,
+                    created_by: user.id
+                });
+
+                // Actualizar stock del asset si no es serializado
+                // [FIX] is_serialized está en inventory_items, no en inventory_assets
+                const { data: asset } = await supabase
+                    .from('inventory_assets')
+                    .select('quantity, inventory_items!inner(is_serialized)')
+                    .eq('id', mat.asset_id)
+                    .single();
+
+                // Accedemos a la propiedad anidada
+                const isSerialized = (asset?.inventory_items as any)?.is_serialized;
+
+                if (asset && !isSerialized) {
+                    await supabase.from('inventory_assets').update({
+                        quantity: Math.max(0, asset.quantity - mat.quantity)
+                    }).eq('id', mat.asset_id);
+                } else if (asset && isSerialized) {
+                    // Si es serializado, se marca como instalado/consumido (sacar de stock técnico)
+                    await supabase.from('inventory_assets').update({
+                        status: 'INSTALADO',
+                        current_holder_id: null
+                    }).eq('id', mat.asset_id);
+                }
+            }
+            return true;
+        } catch (e) {
+            console.error('[Inventory] Error tracking consumption:', e);
             return false;
         }
     },
@@ -591,7 +856,7 @@ export const WorkflowService = {
                 if (ticketId) {
                     try {
                         // Obtener nombre del actor actual para la trazabilidad
-                        const { data: { user } } = await supabase.auth.getUser();
+                        const { data: { user } } = await safeGetUser();
                         let actorName = 'Sistema';
                         if (user) {
                             const { data: actorProfile } = await supabase.from('profiles').select('full_name').eq('id', user.id).single();
@@ -600,7 +865,8 @@ export const WorkflowService = {
 
                         const timestamp = new Date().toLocaleString('es-CO', {
                             dateStyle: 'short',
-                            timeStyle: 'short'
+                            timeStyle: 'short',
+                            timeZone: 'America/Bogota'
                         }).replace(',', '');
 
                         // Bloque profesional para agregar a la descripción
@@ -611,7 +877,7 @@ export const WorkflowService = {
                             await this.changeWispHubTechnician(ticketId, targetUuid, {
                                 priority: options.priority,
                                 file: options.file,
-                                description: fancyComment
+                                descripcion: fancyComment
                             });
                         }
                     } catch (whError) {
@@ -722,7 +988,7 @@ export const WorkflowService = {
             console.log(`[Sync] 🔄 START: Strict Mirror Sync (ForceFull=${forceFull})...`);
 
             // 1. Authenticate context
-            const { data: { user } } = await supabase.auth.getUser();
+            const { data: { user } } = await safeGetUser();
             if (!user) throw new Error("No authenticated user.");
 
             console.log(`[Sync] 👤 Session User: ${user.email} (UID: ${user.id})`);
@@ -874,7 +1140,8 @@ export const WorkflowService = {
 
                     if (isStrictlyMine) {
                         myApiTicketIds.push((ticket.id || ticket.id_ticket).toString());
-                        await this.syncSingleTicketMirror(ticket, allProfiles, profile, { autoAssign: true });
+                        // Si forceFull es true, mandamos forceLocalOverride para romper la protección SS
+                        await this.syncSingleTicketMirror(ticket, allProfiles, profile, { autoAssign: true, forceLocalOverride: forceFull });
                         await new Promise(r => setTimeout(r, 50));
                     }
                 } catch (e) {
@@ -890,6 +1157,7 @@ export const WorkflowService = {
                 .select(`
                     id,
                     activity_id,
+                    updated_at,
                     workflow_activities!inner(
                         workflow_processes!inner(reference_id, metadata)
                     )
@@ -912,6 +1180,15 @@ export const WorkflowService = {
                     continue;
                 }
 
+                // [RACE CONDITION FIX] Período de gracia de 2 minutos
+                // Si el ticket fue inyectado forzosamente de forma local (ej. publicado en Despacho en este mismo instante)
+                // y WispHub aún retorna datos viejos en el getAllTicketsPage, evitamos la purga prematura.
+                const timeSinceLastUpdateMs = new Date().getTime() - new Date(item.updated_at).getTime();
+                if (timeSinceLastUpdateMs < 120000) {
+                    console.log(`[StrictPurge] 🛡️ Ticket #${refId} modificado de forma local hace menos de 2 mins. Inmune a purgas por caché de WispHub.`);
+                    continue;
+                }
+
                 // [STRICT PURGE] Barrido Total: Verificamos propiedad contra WispHub sin importar la fecha
                 // Esto elimina "fantasmas" antiguos que cambiaron de dueño o estado fuera de la ventana de 10 días.
                 try {
@@ -919,15 +1196,26 @@ export const WorkflowService = {
                     const ticketDetail = await WisphubService.getTicketDetail(refId);
 
                     if (ticketDetail) {
-                        // Comprobación estricta por nombre dinámico
-                        const isStrictlyMine = normalize(ticketDetail.tecnico) === normalize(techNameStr);
-                        const isClosed = ['Cerrado', 'Resuelto', 'Cancelado', 'Finalizado'].includes(ticketDetail.estado);
+                        // FIX: Comprobación estricta utilizando los campos mapeados correctos
+                        // mapTicket no siempre genera .tecnico general, pero genera nombre_tecnico, tecnico_id y tecnico_usuario
+                        const mappedTechName = ticketDetail.nombre_tecnico || '';
+                        const mappedTechId = String(ticketDetail.tecnico_id || '');
+                        const mappedTechUser = ticketDetail.tecnico_usuario || '';
+
+                        const isStrictlyMine = (
+                            normalize(mappedTechName) === normalize(techNameStr) ||
+                            (staffMember?.id && mappedTechId === String(staffMember.id)) ||
+                            (staffMember?.usuario && normalize(mappedTechUser) === normalize(staffMember.usuario))
+                        );
+
+                        const isClosed = ['Cerrado', 'Resuelto', 'Cancelado', 'Finalizado'].includes(ticketDetail.nombre_estado || ticketDetail.estado);
 
                         if (isStrictlyMine && !isClosed) {
-                            console.log(`[StrictPurge] ✅ Ticket #${refId} is still mine and active. KEEPING.`);
+                            console.log(`[StrictPurge] ✅ Ticket #${refId} is precisely mine and active. KEEPING.`);
+                            await supabase.from('workflow_workitems').update({ updated_at: new Date().toISOString() }).eq('id', item.id); // Refresh time to avoid cron purge
                             continue;
                         } else {
-                            console.log(`[StrictPurge] 🗑️ Ticket #${refId} ownership changed (${ticketDetail.tecnico}) or closed. PURGING.`);
+                            console.log(`[StrictPurge] 🗑️ Ticket #${refId} closed or reassigned (WispHub: ${mappedTechName} - Local: ${techNameStr}). PURGING.`);
                         }
                     } else {
                         console.log(`[StrictPurge] 🗑️ Ticket #${refId} NOT FOUND in WispHub. PURGING.`);
@@ -943,6 +1231,16 @@ export const WorkflowService = {
             }
 
             if (itemsToPurge.length > 0) {
+                // SEGURO DE GRAVEDAD: Si planeamos purgar más del 80% de los tickets locales 
+                // y el resultado de la API fue muy pequeño, abortamos por seguridad.
+                const localCount = localItems?.length || 0;
+                const purgeRatio = itemsToPurge.length / (localCount || 1);
+
+                if (purgeRatio > 0.8 && localCount > 2) {
+                    console.error(`[Sync] 🛑 BLOQUEO DE SEGURIDAD ACTIVADO. Se intentó purgar el ${Math.round(purgeRatio * 100)}% de los tickets (${itemsToPurge.length}/${localCount}). Abortando purga para proteger datos locales.`);
+                    return true; // Retornamos éxito porque sincronizamos los nuevos, pero protegimos los viejos.
+                }
+
                 console.log(`[Sync] 🗑️ PURGING ${itemsToPurge.length} items (Batch Processing)...`);
                 const BATCH_SIZE = 50;
                 for (let i = 0; i < itemsToPurge.length; i += BATCH_SIZE) {
@@ -964,7 +1262,7 @@ export const WorkflowService = {
     /**
      * Procesa un solo ticket usando UPSERT para sincronización espejo
      */
-    async syncSingleTicketMirror(ticket: any, profiles: any[], syncOwnerProfile?: any, options: { autoAssign?: boolean } = {}): Promise<void> {
+    async syncSingleTicketMirror(ticket: any, profiles: any[], syncOwnerProfile?: any, options: { autoAssign?: boolean, forceLocalOverride?: boolean } = {}): Promise<void> {
         try {
             const ticketIdStr = ticket.id.toString();
             const techName = ticket.tecnico || ticket.nombre_tecnico || 'Sin asignar';
@@ -1094,21 +1392,39 @@ export const WorkflowService = {
 
             // 5. Upsert Workitem (SOLO SI AUTO-ASSIGN O SI YA EXISTE)
             // Esto evita que tickets nuevos en WispHub "salten" al técnico sin intervención manual en la App
+            // 5. Upsert Workitem (SOLO SI AUTO-ASSIGN O SI YA EXISTE)
+            // Esto evita que tickets nuevos en WispHub "salten" al técnico sin intervención manual en la App
             const { data: existingWorkItem } = await supabase
                 .from('workflow_workitems')
-                .select('id')
+                .select('id, status')
                 .eq('activity_id', activity.id)
                 .eq('participant_id', profile.id)
                 .maybeSingle();
 
             if (options.autoAssign || existingWorkItem) {
+                // [CRITICAL FIX] Protección de estado 'SS' (Solved/Submitted)
+                // Si WispHub dice 'PE' (Pending) pero nosotros tenemos 'SS', significa que 
+                // acabamos de finalizarlo y la API de WispHub nos está devolviendo datos viejos (stale).
+                // En este caso, PRESERVAMOS 'SS' para que no reaparezca en la UI.
+                // EXCEPCIÓN: Si forceLocalOverride es true (Deep Sync), confiamos en WispHub.
+                let statusToSave: string = finalStatus;
+
+                const shouldProtectLocalState = !options.forceLocalOverride && existingWorkItem?.status === 'SS' && finalStatus === 'PE';
+
+                if (shouldProtectLocalState) {
+                    console.log(`[Sync] 🛡️ Protecting local 'SS' status for WorkItem ${existingWorkItem.id} against stale WispHub 'PE'.`);
+                    statusToSave = 'SS'; // Mantenemos estado de "Enviado/Resuelto"
+                } else if (options.forceLocalOverride && existingWorkItem?.status === 'SS' && finalStatus === 'PE') {
+                    console.log(`[Sync] ⚠️ Deep Sync FORCE: Overriding local 'SS' with WispHub 'PE'.`);
+                }
+
                 const { error: wErr } = await supabase
                     .from('workflow_workitems')
                     .upsert({
                         activity_id: activity.id,
                         participant_id: profile.id,
                         participant_type: 'user',
-                        status: finalStatus,
+                        status: statusToSave,
                         updated_at: new Date().toISOString()
                     }, { onConflict: 'activity_id,participant_id' });
 
@@ -1168,7 +1484,30 @@ export const WorkflowService = {
         return this.syncMyTickets(forceFull);
     },
 
-    async changeWispHubTechnician(ticketId: string, supabaseUserId: string, options: { priority?: number, file?: File | Blob, description?: string } = {}) {
+    /**
+     * Sincronización PROFUNDA del Espejo Local.
+     * 1. Trae tickets nuevos (syncGlobalTickets).
+     * 2. Purga cerrados y corrige técnicos (silentDetectiveSync).
+     */
+    async fullMirrorResync(onProgress?: (current: number, total: number) => void): Promise<boolean> {
+        try {
+            console.log('[FullSync] 🚀 Iniciando Resincronización Profunda del Espejo...');
+            
+            // Paso 1: Traer lo nuevo/actualizado de los últimos 30 días
+            await this.syncGlobalTickets(30, onProgress);
+            
+            // Paso 2: Purga estricta de "fantasmas" re-revisando contra WispHub
+            await this.silentDetectiveSync({ force: true });
+            
+            console.log('[FullSync] ✨ Espejo local actualizado y purgado.');
+            return true;
+        } catch (error) {
+            console.error('[FullSync] ❌ Error en sincronización profunda:', error);
+            return false;
+        }
+    },
+
+    async changeWispHubTechnician(ticketId: string, supabaseUserId: string, options: { priority?: number, file?: File | Blob, descripcion?: string } = {}) {
         try {
             console.log(`[WispHub] 🔄 Iniciando sincronización FULL PUT para Ticket ${ticketId}...`);
 
@@ -1209,8 +1548,25 @@ export const WorkflowService = {
                 return false;
             }
 
-            // 3. Obtener Datos Actuales (RAW) para el PUT completo
-            const rawTicket = await WisphubService.getTicketRaw(ticketId);
+            // 3. Obtener Datos Actuales — primero del espejo local, luego WispHub como fallback
+            let rawTicket: any = null;
+            try {
+                const { data: mirrorRow } = await supabase
+                    .from('workflow_processes')
+                    .select('metadata')
+                    .eq('reference_id', String(ticketId))
+                    .eq('process_type', 'Ticket AXCES')
+                    .maybeSingle();
+                if (mirrorRow?.metadata) {
+                    rawTicket = mirrorRow.metadata;
+                    console.log(`[WispHub] 📦 Ticket ${ticketId} obtenido del espejo local.`);
+                }
+            } catch { /* ok, usamos WispHub */ }
+
+            if (!rawTicket) {
+                rawTicket = await WisphubService.getTicketRaw(ticketId);
+            }
+
             if (!rawTicket) {
                 console.error(`[WispHub] 🛑 Error: No se pudo obtener el ticket ${ticketId} para actualización completa.`);
                 return false;
@@ -1228,8 +1584,8 @@ export const WorkflowService = {
 
             // 5. Construir Payload Completo (PUT LIMPIO - descripción sin HTML + trazabilidad)
             const cleanBase = stripHtml(rawTicket.descripcion || ".");
-            const finalDescription = options.description
-                ? `${cleanBase}\n\n${options.description}`.trim()
+            const finalDescription = options.descripcion
+                ? `${cleanBase}\n\n${options.descripcion}`.trim()
                 : cleanBase;
 
             const payload = {
@@ -1250,6 +1606,100 @@ export const WorkflowService = {
 
             if (success) {
                 console.log(`[WispHub] 🚀 REASIGNACIÓN EXITOSA (Full PUT) para Ticket ${ticketId}`);
+
+                // --- 7. MAGIA BIDIRECCIONAL (DISPARO DE WEBSOCKETS LOCALES) ---
+                try {
+                    console.log(`[LocalSync] 🔄 Reflejando asignación de Ticket ${ticketId} a Perfil ${supabaseUserId} localmente...`);
+
+                    // Buscamos si existe el proceso para amarrarlo a la actividad activa
+                    const { data: existingProcess } = await supabase
+                        .from('workflow_processes')
+                        .select('id, workflow_activities(id, status)')
+                        .eq('reference_id', String(ticketId))
+                        .maybeSingle();
+
+                    if (existingProcess) {
+                        // Encontrar la 'Actividad' Activa de ese ticket
+                        const activeActivity = existingProcess.workflow_activities?.find((a: any) => a.status === 'Active')
+                            || existingProcess.workflow_activities?.[0];
+
+                        if (activeActivity) {
+                            // 7.1 Limpiar (Reasignar/Desvincular) al usuario anterior
+                            await supabase
+                                .from('workflow_workitems')
+                                .update({ status: 'RE', updated_at: new Date().toISOString() })
+                                .eq('activity_id', activeActivity.id)
+                                .neq('participant_id', supabaseUserId)
+                                .eq('status', 'PE');
+
+                            // 7.2 Asignar / Upsertar al NUEVO usuario
+                            await supabase
+                                .from('workflow_workitems')
+                                .upsert({
+                                    activity_id: activeActivity.id,
+                                    participant_id: supabaseUserId,
+                                    participant_type: 'user',
+                                    status: 'PE', // Pendiente = Tarea Viva
+                                    updated_at: new Date().toISOString()
+                                }, { onConflict: 'activity_id,participant_id' });
+
+                            console.log(`[LocalSync] ✅ WorkItem actualizado. WebSocket disparado a ${profile.full_name || supabaseUserId} 🚀`);
+                        }
+                    } else {
+                        // Si no existe localmente, lanzamos un DeepSync forzado a nombre de él para descargarlo
+                        console.log(`[LocalSync] ⚠️ El Ticket ${ticketId} no existe localmente. Lanzando Sync Inmediato y Forzando Inserción Local...`);
+
+                        // 1. Crear el Proceso Mínimo Viable (Metadata Básica)
+                        const { data: newProcess, error: pErr } = await supabase
+                            .from('workflow_processes')
+                            .upsert({
+                                reference_id: String(ticketId),
+                                title: `${rawTicket.asunto || 'Ticket'} - ${rawTicket.nombre_cliente || 'Cliente'}`,
+                                status: 'PE',
+                                process_type: 'Ticket AXCES',
+                                metadata: { ...rawTicket, current_level: profile.operational_level || 1 },
+                                updated_at: new Date().toISOString()
+                            }, { onConflict: 'reference_id' })
+                            .select()
+                            .single();
+
+                        if (newProcess && !pErr) {
+                            // 2. Crear Actividad
+                            const { data: newActivity, error: aErr } = await supabase
+                                .from('workflow_activities')
+                                .upsert({
+                                    process_id: newProcess.id,
+                                    name: 'Gestión de Ticket',
+                                    status: 'Active',
+                                    activity_type: 'task',
+                                    updated_at: new Date().toISOString()
+                                }, { onConflict: 'process_id,activity_type' })
+                                .select()
+                                .single();
+
+                            if (newActivity && !aErr) {
+                                // 3. ¡EL GATILLO DEL WEBSOCKET! Crear el WorkItem para el Técnico
+                                await supabase
+                                    .from('workflow_workitems')
+                                    .upsert({
+                                        activity_id: newActivity.id,
+                                        participant_id: supabaseUserId, // UUID local exacto
+                                        participant_type: 'user',
+                                        status: 'PE',
+                                        updated_at: new Date().toISOString()
+                                    }, { onConflict: 'activity_id,participant_id' });
+
+                                console.log(`[LocalSync] 🎯 INYECCIÓN FORZADA EXITOSA. WebSocket disparado a ${profile.full_name || supabaseUserId} 🚀`);
+                            }
+                        }
+
+                        // Por seguridad, dejamos que el mirror haga lo suyo detrás de escena
+                        this.syncSingleTicketMirror(rawTicket, [profile], profile, { autoAssign: true, forceLocalOverride: true });
+                    }
+                } catch (localSyncErr) {
+                    console.error('[LocalSync] ❌ Fallo al reflejar asignación local (El WebSocket no saltó):', localSyncErr);
+                }
+
                 return true;
             }
             return false;
@@ -1262,7 +1712,7 @@ export const WorkflowService = {
     // --- AUDITORÍA DE DESPACHO ---
     async logDispatchBatch(technicianCount: number, ticketCount: number, metadata: any = {}) {
         try {
-            const { data: { user } } = await supabase.auth.getUser();
+            const { data: { user } } = await safeGetUser();
             if (!user) {
                 console.error('[logDispatchBatch] 🛑 Error: No hay sesión de usuario activa (user is null).');
                 return false;
@@ -1292,8 +1742,9 @@ export const WorkflowService = {
 
     /**
      * Calcula el Dispatch Score para un ticket basado en prioridad, SLA y recurrencia.
+     * @param preCalculatedRecurrence Opcional. Si se pasa, evita la consulta a la BD.
      */
-    async calculateDispatchScore(ticket: any): Promise<number> {
+    async calculateDispatchScore(ticket: any, preCalculatedRecurrence?: number): Promise<number> {
         let score = 0;
 
         // 1. Prioridad (Peso Crítico)
@@ -1311,14 +1762,22 @@ export const WorkflowService = {
         score += hoursOpen;
 
         // 3. Recurrencia (Visitas en el mes)
-        const serviceId = ticket.servicio;
-        if (serviceId) {
-            const now = new Date();
-            const recurrence = await this.getClientRecurrence(String(serviceId), now.getFullYear(), now.getMonth() + 1);
-            if (recurrence > 1) {
-                // Penalización/Prioridad por cada visita adicional
-                score += (recurrence - 1) * 60;
+        // Optimization: Use pre-calculated value if available to avoid N+1 DB calls
+        let recurrence = preCalculatedRecurrence;
+
+        if (recurrence === undefined) {
+            const serviceId = ticket.servicio;
+            if (serviceId) {
+                const now = new Date();
+                recurrence = await this.getClientRecurrence(String(serviceId), now.getFullYear(), now.getMonth() + 1);
+            } else {
+                recurrence = 0;
             }
+        }
+
+        if (recurrence > 1) {
+            // Penalización/Prioridad por cada visita adicional
+            score += (recurrence - 1) * 60;
         }
 
         return score;
@@ -1340,6 +1799,39 @@ export const WorkflowService = {
             return 0;
         }
         return data || 0;
+    },
+
+    /**
+     * Obtiene el conteo de visitas para múltiples clientes en una sola llamada (Batch Optimization).
+     */
+    async getClientsVisitCountsBatch(clientIds: string[], year: number, month: number): Promise<Record<string, number>> {
+        if (!clientIds || clientIds.length === 0) return {};
+
+        // Limpieza de IDs nulos
+        const safeIds = clientIds.filter(id => id && id !== '0' && id !== '');
+        if (safeIds.length === 0) return {};
+
+        const { data, error } = await supabase
+            .rpc('get_clients_visit_counts_batch', {
+                p_client_ids: safeIds,
+                p_year: year,
+                p_month: month
+            });
+
+        if (error) {
+            // FALLBACK SILENCIOSO: Si falla el RPC (ej. aún no existe), retornamos vacío para no romper la app
+            console.warn('[Dispatch] Batch RPC not available or failed. Returning empty counts.', error.message);
+            return {};
+        }
+
+        // Convertir array de resultados a Mapa rápido
+        const counts: Record<string, number> = {};
+        if (data && Array.isArray(data)) {
+            data.forEach((item: any) => {
+                counts[item.client_id] = item.visit_count;
+            });
+        }
+        return counts;
     },
 
     /**

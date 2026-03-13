@@ -13,7 +13,7 @@ import {
     CheckCircle2,
     ClipboardCheck,
     BarChart3,
-    FileText
+
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
@@ -65,12 +65,13 @@ export default function InventoryDashboard() {
     const loadDashboardData = async () => {
         setLoading(true);
         try {
-            const { data: assets } = await supabase.from('inventory_assets').select('status, item_id');
+            const { data: assets } = await supabase.from('inventory_assets').select('status, item_id, quantity');
             if (assets) {
                 const counts = assets.reduce((acc: any, curr: any) => {
                     const status = curr.status || 'warehouse';
-                    acc[status] = (acc[status] || 0) + 1;
-                    acc.total++;
+                    const qty = Number(curr.quantity) || 1;
+                    acc[status] = (acc[status] || 0) + qty;
+                    acc.total = (acc.total || 0) + qty;
                     return acc;
                 }, { total: 0, warehouse: 0, assigned: 0, installed: 0, defective: 0, recovered: 0 });
                 setStats(counts);
@@ -84,7 +85,10 @@ export default function InventoryDashboard() {
             if (items && assets) {
                 const stockAlerts = items
                     .map(item => {
-                        const currentStock = assets.filter(a => a.item_id === item.id && a.status === 'warehouse').length;
+                        const currentStock = assets
+                            .filter(a => a.item_id === item.id && a.status === 'warehouse')
+                            .reduce((sum, a) => sum + (Number(a.quantity) || 1), 0);
+
                         const minLevel = item.min_stock_level || 0;
 
                         return {
@@ -95,7 +99,7 @@ export default function InventoryDashboard() {
                         };
                     })
                     .filter(a => a.isCritical || a.isLow)
-                    .sort((a, b) => a.currentStock - b.currentStock);
+                    .sort((a, b) => (a.currentStock as number) - (b.currentStock as number));
 
                 setAlerts(stockAlerts);
             }
@@ -240,20 +244,7 @@ export default function InventoryDashboard() {
                 <div className="space-y-4">
                     <h2 className="text-[10px] font-black uppercase text-slate-400 tracking-widest px-1">📊 Administración y Reportes</h2>
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                        {canAccess('slips') && (
-                            <button
-                                onClick={() => navigate('/operaciones/inventario/actas')}
-                                className="group flex flex-col gap-4 bg-white border border-slate-200 p-6 rounded-2xl hover:border-amber-300 hover:shadow-md hover:bg-amber-50/30 transition-all text-left"
-                            >
-                                <div className="p-3 bg-amber-100/50 text-amber-600 rounded-xl w-fit group-hover:scale-110 transition-transform">
-                                    <FileText size={24} strokeWidth={2.5} />
-                                </div>
-                                <div>
-                                    <p className="text-sm font-black uppercase text-slate-800">Actas</p>
-                                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Entrega y Cierre</p>
-                                </div>
-                            </button>
-                        )}
+
 
                         {canAccess('analytics') && (
                             <button
@@ -263,12 +254,14 @@ export default function InventoryDashboard() {
                                 <div className="p-3 bg-violet-100/50 text-violet-600 rounded-xl w-fit group-hover:scale-110 transition-transform">
                                     <BarChart3 size={24} strokeWidth={2.5} />
                                 </div>
-                                <div>
+                                <div className="">
                                     <p className="text-sm font-black uppercase text-slate-800">Reportes</p>
                                     <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Gasto y Rotación</p>
                                 </div>
                             </button>
                         )}
+
+
                     </div>
                 </div>
             )}

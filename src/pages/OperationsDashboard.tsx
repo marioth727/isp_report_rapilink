@@ -1,6 +1,8 @@
 import { useEffect, useState, useMemo } from 'react';
 import useSWR from 'swr';
 import { WisphubService, whNormalize } from '../lib/wisphub';
+import { supabase } from '../lib/supabase';
+import { WorkflowService } from '../lib/workflowService';
 import {
     AlertTriangle,
     Clock,
@@ -43,7 +45,6 @@ export function OperationsDashboard() {
     const initialFilter = (location.state as any)?.filter || 'todos';
     const initialSearchId = (location.state as any)?.searchId || '';
 
-    const [syncProgress, setSyncProgress] = useState({ current: 0, total: 0 });
     const [activeFilter, setActiveFilter] = useState<FilterType>(initialFilter);
 
     // Sync searchId from navigation state reactively
@@ -62,31 +63,17 @@ export function OperationsDashboard() {
     const [sortConfig, setSortConfig] = useState<SortConfig>(null);
     const [showFilters, setShowFilters] = useState(false);
 
-    // SWR Fetcher
+    // SWR Fetcher - ESTRATEGIA: ESPEJO LOCAL (REALTIME)
     const fetcher = async () => {
-        console.log('[SWR] Iniciando fetcher de Trazabilidad...');
-        setSyncProgress({ current: 0, total: 0 });
+        console.log('[SWR-Dashboard] Recuperando tickets desde Espejo Local...');
 
-        const now = new Date();
-        const past60Days = new Date();
-        past60Days.setDate(now.getDate() - 60);
-        const startDate = past60Days.toISOString().split('T')[0];
+        // 1. Cargar Tickets desde Supabase Mirror
+        const mirroredTickets = await WorkflowService.getOperationalTicketsMirror();
 
-        // 1. Cargar Tickets Abiertos
-        const openTickets = await WisphubService.getAllTickets(
-            { startDate, status: '1' },
-            (current, total) => setSyncProgress({ current, total: total * 2 })
-        );
-
-        // 2. Cargar Tickets En Progreso
-        const inProgressTickets = await WisphubService.getAllTickets(
-            { startDate, status: '2' },
-            (current, _) => setSyncProgress(prev => ({ current: prev.current + current, total: prev.total }))
-        );
-
-        const activeTickets = [...openTickets, ...inProgressTickets].sort((a, b) =>
-            new Date(b.fecha_creacion).getTime() - new Date(a.fecha_creacion).getTime()
-        );
+        // 2. Filtrar solo los activos (Pendientes 1, Proceso 2, Rezagados 5)
+        const activeTickets = mirroredTickets
+            .filter(t => [1, 2, 5, '1', '2', '5'].includes(t.id_estado))
+            .sort((a, b) => new Date(b.fecha_creacion).getTime() - new Date(a.fecha_creacion).getTime());
 
         // 3. Calcular Stats
         const newStats = activeTickets.reduce((acc: any, ticket: any) => {
@@ -97,7 +84,7 @@ export function OperationsDashboard() {
             return acc;
         }, { total: 0, critico: 0, amarillo: 0, verde: 0 });
 
-        // 4. Cargar Asuntos
+        // 4. Cargar Asuntos (Fallback a WispHub ya que son estáticos)
         const officialSubjects = await WisphubService.getTicketSubjects();
 
         return {
@@ -111,8 +98,8 @@ export function OperationsDashboard() {
         ['operations_dashboard_data'],
         fetcher,
         {
-            revalidateOnFocus: false,
-            revalidateIfStale: false,
+            revalidateOnFocus: true,
+            revalidateIfStale: true,
             keepPreviousData: true,
             dedupingInterval: 60000,
             onSuccess: (data) => {
@@ -126,6 +113,30 @@ export function OperationsDashboard() {
             }
         }
     );
+
+    // Suscripción Realtime para el Dashboard
+    useEffect(() => {
+        const channel = supabase
+            .channel('dashboard_mirror_sync')
+            .on(
+                'postgres_changes',
+                {
+                    event: '*',
+                    schema: 'public',
+                    table: 'workflow_processes',
+                    filter: `process_type=eq.Ticket AXCES`
+                },
+                () => {
+                    console.log('[Dashboard-Realtime] 🔄 Cambio detectado. Recalculando...');
+                    mutate();
+                }
+            )
+            .subscribe();
+
+        return () => {
+            supabase.removeChannel(channel);
+        };
+    }, [mutate]);
 
     // Lógica de recuperación de caché si SWR no tiene datos
     const cachedData = useMemo(() => {
@@ -346,8 +357,7 @@ export function OperationsDashboard() {
         <div className="flex flex-col items-center justify-center h-[60vh] space-y-4">
             <div className="w-12 h-12 border-4 border-primary border-t-transparent rounded-full animate-spin"></div>
             <p className="text-muted-foreground animate-pulse font-medium text-lg uppercase tracking-widest font-black">
-                Sincronizando {syncProgress.current} tickets...
-                {syncProgress.total > 0 && <span className="opacity-50 ml-2">de {syncProgress.total}</span>}
+                Cargando datos operativos...
             </p>
         </div>
     );

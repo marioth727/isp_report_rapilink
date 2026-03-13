@@ -14,13 +14,19 @@ import {
     ExternalLink,
     ChevronDown,
     CloudUpload,
-    CloudDownload
+    CloudDownload,
+    RefreshCw
 } from 'lucide-react';
 import { MapContainer, TileLayer, Marker, Popup, Circle } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd';
 import type { DropResult } from '@hello-pangea/dnd';
+import { supabase } from '../lib/supabase';
+import { WorkflowService } from '../lib/workflowService';
+import { WisphubService } from '../lib/wisphub';
+import { OperationalTimeline } from './OperationalTimeline';
+import clsx from 'clsx';
 
 // Componente Portal para evitar el recorte de los tickets durante el arrastre
 const Portal = ({ children }: { children: React.ReactNode }) => {
@@ -46,10 +52,6 @@ const createClusterIcon = (count: number) => {
         popupAnchor: [0, -36]
     });
 };
-import { WorkflowService } from '../lib/workflowService';
-import { WisphubService } from '../lib/wisphub';
-import { OperationalTimeline } from './OperationalTimeline';
-import clsx from 'clsx';
 
 interface DispatchTicket {
     id: string;
@@ -84,6 +86,9 @@ interface DispatchTicket {
     servicio?: any;
     nombre_tecnico?: string;
     tecnico_id?: string | number;
+    tecnico_usuario?: string;
+    email_tecnico?: string;
+    departamento?: string;
 }
 
 export function OperationsDispatch() {
@@ -117,23 +122,90 @@ export function OperationsDispatch() {
 
     // Ref para control del mapa (RESTAURADO)
     const mapRef = useRef<L.Map | null>(null);
+    // Refs para evitar procesamientos duplicados o bucles infinitos
+    const lastProcessedRef = useRef<string>('');
+    const assignedRoutesRef = useRef(assignedRoutes);
+    const neighborhoodsRef = useRef(neighborhoods);
+
+    // Sincronizar refs con el estado para que processTickets tenga datos frescos sin ser reactivo
+    useEffect(() => { assignedRoutesRef.current = assignedRoutes; }, [assignedRoutes]);
+    useEffect(() => { neighborhoodsRef.current = neighborhoods; }, [neighborhoods]);
+
+    const [isFullResyncing, setIsFullResyncing] = useState(false);
+
+    // Inicializar caché de WispHub para mapeo de tickets
+    useEffect(() => {
+        WisphubService.getStaff();
+    }, []);
 
     // SWR HOOKS
-    const { data: techList, isValidating: isSyncingTechs } = useSWR('platform-users', () => WorkflowService.getPlatformUsers());
-    const { data: rawTickets, mutate: mutateTickets, error: ticketsError, isValidating: isSyncingTickets } = useSWR('wisphub-operational-tickets',
-        () => WisphubService.getAllTickets({ status: '1,5' }), // Incluimos Rezagados (5)
-        { refreshInterval: 60000, revalidateOnFocus: true }
+    // SWR HOOKS - OFFLINE FIRST STRATEGY (V2)
+    // 1. Técnicos
+    const { data: techList, isValidating: isSyncingTechs } = useSWR('platform-users',
+        () => WorkflowService.getPlatformUsers(),
+        {
+            refreshInterval: 300000, // Cada 5 min es suficiente para técnicos
+            revalidateOnFocus: false,
+            fallbackData: JSON.parse(localStorage.getItem('swr_platform_users') || 'null'),
+            onSuccess: (data) => localStorage.setItem('swr_platform_users', JSON.stringify(data))
+        }
     );
-    const { data: inProgressTickets, isValidating: isSyncingInProgress } = useSWR('wisphub-in-progress-tickets',
-        () => WisphubService.getAllTickets({ status: '2' }),
-        { refreshInterval: 60000, revalidateOnFocus: true }
-    );
-    const { data: completedTicketsRaw, isValidating: isSyncingCompleted } = useSWR('wisphub-completed-tickets',
-        () => WisphubService.getAllTickets({ status: '3,4' }),
-        { refreshInterval: 60000, revalidateOnFocus: true }
+    // --- NUEVA ESTRATEGIA: ESPEJO LOCAL (REALTIME) ---
+    const { data: mirrorData, mutate: mutateMirror, isValidating: isSyncingMirror, error: ticketsError } = useSWR('operational-tickets-mirror-v3',
+        () => WorkflowService.getOperationalTicketsMirror(),
+        {
+            refreshInterval: 0, // No polling! Usamos WebSockets
+            revalidateOnFocus: false, // DESACTIVADO: evita peticiones competidoras que se abortan entre sí
+            dedupingInterval: 10000, // 10s de deduplicación para evitar doble-fetch al montar
+            fallbackData: JSON.parse(localStorage.getItem('swr_operational_mirror_v3') || '[]'),
+            onSuccess: (data) => {
+                try {
+                    // Guardar solo los primeros 100 como caché offline (localStorage tiene límite de 5MB)
+                    localStorage.setItem('swr_operational_mirror_v3', JSON.stringify(data.slice(0, 100)));
+                } catch { /* localStorage lleno o bloqueado, continuar sin caché */ }
+            }
+        }
     );
 
-    const isGlobalSyncing = isSyncingTickets || isSyncingInProgress || isSyncingCompleted || isSyncingTechs;
+    // Mapeo retrocompatible para no romper el resto del componente
+    const rawTickets = useMemo(() => mirrorData?.filter(t => [1, 5, '1', '5'].includes(t.id_estado)) || [], [mirrorData]);
+    const inProgressTickets = useMemo(() => mirrorData?.filter(t => [2, '2'].includes(t.id_estado)) || [], [mirrorData]);
+    const completedTicketsRaw = useMemo(() => mirrorData?.filter(t => [3, 4, '3', '4'].includes(t.id_estado)) || [], [mirrorData]);
+
+    const mutateTickets = mutateMirror; // Alias para compatibilidad
+    const isGlobalSyncing = isSyncingMirror || isSyncingTechs;
+
+    // Suscripción Realtime para actualizaciones instantáneas
+    useEffect(() => {
+        const channel = supabase
+            .channel('dispatch_mirror_sync')
+            .on(
+                'postgres_changes',
+                {
+                    event: '*',
+                    schema: 'public',
+                    table: 'workflow_processes',
+                    filter: `process_type=eq.Ticket AXCES`
+                },
+                () => {
+                    console.log('[Dispatch-Realtime] 🔄 Cambio detectado en espejo local. Mutando...');
+                    mutateMirror();
+                }
+            )
+            .subscribe((status: string) => {
+                console.log('[Dispatch-Realtime] Estado suscripción:', status);
+            });
+
+        // Lanzar validación silenciosa (El Detective)
+        // Se ejecuta una vez sin bloquear el renderizado ni la carga inicial.
+        setTimeout(() => {
+            WorkflowService.silentDetectiveSync().catch(console.error);
+        }, 3000); // 3 segundos de retraso para no competir con el fetch inicial
+
+        return () => {
+            supabase.removeChannel(channel);
+        };
+    }, [mutateMirror]);
 
     const technicians = useMemo(() => {
         if (!techList) return [];
@@ -215,12 +287,31 @@ export function OperationsDispatch() {
     }, [getLocalToday]);
 
     useEffect(() => {
-        const stored = localStorage.getItem('dispatch_manual_strict_v1');
-        let draftRoutes: Record<string, DispatchTicket[]> = {};
+        // MIGRACIÓN Y LIMPIEZA DE LLAVES ANTIGUAS
+        const legacyKeys = ['dispatch_manual_strict_v1', 'dispatch_draft_schedule_v1'];
+        let migratedRoutes: Record<string, DispatchTicket[]> | null = null;
+
+        legacyKeys.forEach(key => {
+            const stored = localStorage.getItem(key);
+            if (stored) {
+                try {
+                    const { date, routes } = JSON.parse(stored);
+                    if (date === getLocalToday()) migratedRoutes = routes;
+                } catch (e) { }
+                localStorage.removeItem(key); // Limpiar llave antigua
+            }
+        });
+
+        // CARGA DE LLAVE ESTÁNDAR
+        const stored = localStorage.getItem('dispatch_v1_assigned_routes');
+        let draftRoutes: Record<string, DispatchTicket[]> = migratedRoutes || {};
+
         if (stored) {
             try {
                 const { date, routes } = JSON.parse(stored);
-                if (date === getLocalToday()) draftRoutes = routes;
+                if (date === getLocalToday()) {
+                    draftRoutes = { ...draftRoutes, ...routes };
+                }
             } catch (e) { }
         }
 
@@ -245,68 +336,126 @@ export function OperationsDispatch() {
                 return next;
             });
         }
-    }, [technicians.length]);
+    }, [technicians.length, getLocalToday]);
+
+    // Persistencia Automática de Rutas
+    useEffect(() => {
+        if (Object.keys(assignedRoutes).length > 0) {
+            localStorage.setItem('dispatch_v1_assigned_routes', JSON.stringify({
+                date: getLocalToday(),
+                routes: assignedRoutes
+            }));
+        }
+    }, [assignedRoutes, getLocalToday]);
+
+    const processTickets = useCallback(async (allTickets: DispatchTicket[]) => {
+        if (allTickets.length === 0) {
+            setTickets([]);
+            setLoading(false);
+            return;
+        }
+
+        try {
+            // Estado inicial rápido
+            setTickets(allTickets.map(t => ({ ...t, barrio: t.barrio || 'Cargando...', score: 0 })));
+
+            // 1. CARGA MASIVA DE RECURRENCIAS (Batching RPC)
+            const clientIds = allTickets.map(t => t.servicio ? String(t.servicio) : '').filter(id => id && id !== '0');
+            const now = new Date();
+
+            // Intentar carga masiva, si falla (502), usamos 0 por defecto
+            let visitCountsMap: Record<string, number> = {};
+            try {
+                visitCountsMap = await WorkflowService.getClientsVisitCountsBatch(clientIds, now.getFullYear(), now.getMonth() + 1);
+            } catch (err) {
+                console.warn("Error fetching recurrences (Server might be down):", err);
+            }
+
+            const enriched = await Promise.all(allTickets.map(async (t) => {
+                const recurrence = visitCountsMap[String(t.servicio)] || 0;
+                let score = 0;
+                try {
+                    score = await WorkflowService.calculateDispatchScore(t, recurrence);
+                } catch (err) { /* silent fail on score calc if server 502 */ }
+
+                const barrio = t.barrio || t.servicio_completo?.barrio || t.servicio_completo?.localidad || 'Sin Barrio';
+                // Sanitizar nombre_tecnico: el string literal "undefined" se trata como vacío
+                const techName = (t.nombre_tecnico && t.nombre_tecnico !== 'undefined') ? t.nombre_tecnico : null;
+                return {
+                    ...t,
+                    barrio,
+                    score,
+                    recurrence,
+                    tecnico_actual: techName || 'Sin Asignar',
+                    tecnico_usuario: t.tecnico_usuario // Propagar campo crítico para filtro estricto
+                };
+            }));
+
+            // El POOL solo debe mostrar tickets que NO están asignados a ningún técnico en la App
+            const assignedIds = new Set(Object.values(assignedRoutesRef.current).flat().map(t => t.id));
+            const poolTickets = enriched.filter(t => !assignedIds.has(t.id));
+            const sorted = poolTickets.sort((a, b) => b.score - a.score);
+
+            setTickets(sorted);
+            setLoading(false);
+
+            // Sincronizar assignedRoutes con datos frescos de WispHub (Filtro Anti-Fantasmas)
+            const allValidTicketsMap = new Map<string, DispatchTicket>(enriched.map(t => [String(t.id), t]));
+            setAssignedRoutes(prev => {
+                const next: Record<string, DispatchTicket[]> = { ...prev };
+                let modified = false;
+                Object.keys(next).forEach(techId => {
+                    const currentRoute = next[techId] || [];
+                    const updatedRoute = currentRoute
+                        .map(t => allValidTicketsMap.get(String(t.id)) || t)
+                        .filter(t => allValidTicketsMap.has(String(t.id)));
+
+                    if (JSON.stringify(currentRoute.map(t => t.id)) !== JSON.stringify(updatedRoute.map(t => t.id))) {
+                        next[techId] = updatedRoute;
+                        modified = true;
+                    }
+                });
+                return modified ? next : prev;
+            });
+
+            // Georef (Barrios) - Procesamiento por lotes para no saturar
+            const allBarrios = Array.from(new Set(enriched.map(t => t.barrio))).filter(b => b && b !== 'Sin Barrio' && !neighborhoodsRef.current[b]);
+
+            if (allBarrios.length > 0) {
+                const batchSize = 5;
+                for (let i = 0; i < allBarrios.length; i += batchSize) {
+                    const batch = allBarrios.slice(i, i + batchSize);
+                    await Promise.all(batch.map(async (b) => {
+                        try {
+                            const ref = await WorkflowService.getNeighborhoodGeoref(b);
+                            if (ref) {
+                                setNeighborhoods(prev => ({ ...prev, [b]: ref }));
+                            }
+                        } catch (e) {
+                            console.warn(`Error georeferencing barrio: ${b}`, e);
+                        }
+                    }));
+                }
+            }
+        } catch (error) {
+            console.error("Error in processTickets:", error);
+            setLoading(false);
+        }
+    }, []);
 
     // Procesamiento de Tickets (Abiertos y En Progreso para el Pool)
     useEffect(() => {
         if (techList !== undefined && rawTickets !== undefined && inProgressTickets !== undefined) {
             const combined = [...(rawTickets || []), ...(inProgressTickets || [])];
-            processTickets(combined);
+            const signature = JSON.stringify(combined.map(t => t.id));
+
+            if (signature !== lastProcessedRef.current) {
+                lastProcessedRef.current = signature;
+                processTickets(combined);
+            }
         }
-    }, [rawTickets, inProgressTickets, techList]);
+    }, [rawTickets, inProgressTickets, techList, processTickets]);
 
-    const processTickets = async (allTickets: DispatchTicket[]) => {
-        setTickets(allTickets.map(t => ({ ...t, barrio: t.barrio || 'Cargando...', score: 0 })));
-        setLoading(false);
-        try {
-            // Obtener todos los IDs que ya están en las rutas para no duplicarlos en el POOL
-            const assignedIds = new Set(Object.values(assignedRoutes).flat().map(t => t.id));
-
-            const enriched = await Promise.all(allTickets.map(async (t) => {
-                const score = await WorkflowService.calculateDispatchScore(t);
-                const barrio = t.barrio || t.servicio_completo?.barrio || t.servicio_completo?.localidad || 'Sin Barrio';
-                const recurrence = await WorkflowService.getClientRecurrence(t.servicio, new Date().getFullYear(), new Date().getMonth() + 1);
-                return { ...t, barrio, score, recurrence, tecnico_actual: t.nombre_tecnico || 'Sin Asignar' };
-            }));
-
-            // El POOL solo debe mostrar tickets que NO están asignados a ningún técnico en la App
-            const poolTickets = enriched.filter(t => !assignedIds.has(t.id));
-            const sorted = poolTickets.sort((a, b) => b.score - a.score);
-            setTickets(sorted);
-
-            setTickets(sorted);
-
-            // Sincronizar assignedRoutes con datos frescos de WispHub (Filtro Anti-Fantasmas)
-            // Si un ticket en las rutas ya no viene en los datos de WispHub (porque se cerró), lo quitamos.
-            const allValidTicketsMap = new Map<string, DispatchTicket>(enriched.map(t => [String(t.id), t]));
-            setAssignedRoutes(prev => {
-                const next: Record<string, DispatchTicket[]> = { ...prev };
-                Object.keys(next).forEach(techId => {
-                    next[techId] = (next[techId] || [])
-                        .map(t => allValidTicketsMap.get(String(t.id)) || t) // Refrescar datos por si cambió algo
-                        .filter(t => allValidTicketsMap.has(String(t.id))); // Eliminar si ya no existe en WispHub
-                });
-                return next;
-            });
-
-            // Inicializar rutas si están vacías (Lienzo limpio) 
-            if (Object.keys(assignedRoutes).length === 0 && technicians.length > 0) {
-                const initRoutes: Record<string, DispatchTicket[]> = {};
-                technicians.forEach(tech => { initRoutes[tech.id] = []; });
-                setAssignedRoutes(initRoutes);
-            }
-
-            // GeoRef
-            const uniqueBarrios = Array.from(new Set(poolTickets.map(t => t.barrio)));
-            for (const b of uniqueBarrios) {
-                if (!neighborhoods[b]) {
-                    WorkflowService.getNeighborhoodGeoref(b).then(ref => {
-                        if (ref) setNeighborhoods(prev => ({ ...prev, [b]: ref }));
-                    });
-                }
-            }
-        } catch (e) { }
-    };
 
     // Filtro para Vista de Despacho (Pool)
     const filteredTickets = useMemo(() => {
@@ -319,8 +468,13 @@ export function OperationsDispatch() {
                 const matchesSearch = !searchQuery || normalize(t.nombre_cliente).includes(normalize(searchQuery)) || normalize(t.barrio).includes(normalize(searchQuery));
                 const selectedTech = technicians.find(tech => tech.id === filterTechId);
                 const matchesTech = filterTechId === 'all' || (selectedTech?.full_name && t.tecnico_actual && normalize(t.tecnico_actual).includes(normalize(selectedTech.full_name)));
-                const isInstallationTech = t.tecnico_actual && (normalize(t.tecnico_actual).includes('instalaciones@rapilink-sas') || normalize(t.tecnico_actual).includes('instalaciones'));
-                const matchesInstall = !showInstallations || isInstallationTech;
+                // FILTRO ESTRICTO DE INSTALACIONES:
+                // Un ticket es de instalaciones si coincide el usuario o el correo electrónico conocido
+                const isInstallationTicket = t.tecnico_usuario === 'instalaciones@rapilink-sas';
+
+                // Si el toggle está OFF → excluir instalaciones del pool (matchesInstall=false para ellos)
+                // Si el toggle está ON  → mostrar SOLO instalaciones
+                const matchesInstall = showInstallations ? isInstallationTicket : !isInstallationTicket;
                 const matchesMap = !mapFilter || t.barrio === mapFilter;
                 return matchesSearch && matchesTech && matchesInstall && matchesMap;
             });
@@ -418,8 +572,8 @@ export function OperationsDispatch() {
 
         // Caso 2: Movimiento entre listas diferentes
         const itemToMove = source.droppableId === 'unassigned'
-            ? tickets[source.index]
-            : (assignedRoutes[source.droppableId] || [])[source.index];
+            ? tickets.find(t => String(t.id) === String(draggableId))
+            : (assignedRoutes[source.droppableId] || []).find(t => String(t.id) === String(draggableId));
 
         if (!itemToMove) return;
 
@@ -477,33 +631,85 @@ export function OperationsDispatch() {
         }
     };
 
+    const handleFullResync = async () => {
+        if (isFullResyncing) return;
+        setIsFullResyncing(true);
+        window.dispatchEvent(new CustomEvent('app:toast', { 
+            detail: { id: 'deep-sync', message: 'Sincronización profunda: trayendo nuevos y purgando fantasmas...', type: 'loading', duration: 0 } 
+        }));
+
+        try {
+            const success = await WorkflowService.fullMirrorResync();
+            if (success) {
+                await mutateMirror();
+                window.dispatchEvent(new CustomEvent('app:toast', { 
+                    detail: { id: 'deep-sync', message: 'Sincronización terminada. Espejo local actualizado.', type: 'success', duration: 3000 } 
+                }));
+            } else {
+                window.dispatchEvent(new CustomEvent('app:toast', { 
+                    detail: { id: 'deep-sync', message: 'Error en la sincronización profunda.', type: 'error', duration: 3000 } 
+                }));
+            }
+        } finally {
+            setIsFullResyncing(false);
+        }
+    };
+
     const handlePublish = async () => {
-        const total = Object.values(assignedRoutes).flat().length;
-        if (total === 0 || !confirm(`¿Deseas publicar ${total} tickets?`)) return;
+        const entries = Object.entries(assignedRoutes).filter(([, tickets]) => tickets.length > 0);
+        const total = entries.reduce((sum, [, tickets]) => sum + tickets.length, 0);
+
+        if (total === 0) {
+            window.dispatchEvent(new CustomEvent('app:toast', { detail: { message: 'No hay tickets asignados para publicar.', type: 'info' } }));
+            return;
+        }
+        if (!confirm(`¿Deseas publicar ${total} ticket(s) para ${entries.length} técnico(s)?`)) return;
+
         setLoading(true);
+        window.dispatchEvent(new CustomEvent('app:toast', { detail: { id: 'publish-progress', message: `Publicando ${total} tickets...`, type: 'loading', duration: 0 } }));
+
         try {
             const manifestEntries: Record<string, string> = {};
-            for (const [techId, routeTickets] of Object.entries(assignedRoutes)) {
-                if (routeTickets.length === 0) continue;
-                const technician = technicians.find(t => t.id === techId);
-                for (const ticket of routeTickets) {
-                    await WorkflowService.changeWispHubTechnician(ticket.id, techId);
-                    if (technician) manifestEntries[ticket.id] = technician.full_name || 'Desconocido';
-                }
-            }
+
+            // Ejecutar TODAS las reasignaciones en PARALELO (no en serie)
+            await Promise.all(
+                entries.flatMap(([techId, routeTickets]) => {
+                    const technician = technicians.find(t => t.id === techId);
+                    return routeTickets.map(async (ticket) => {
+                        const ok = await WorkflowService.changeWispHubTechnician(ticket.id, techId);
+                        if (ok && technician) {
+                            manifestEntries[ticket.id] = technician.full_name || 'Desconocido';
+                        }
+                    });
+                })
+            );
+
+            // Guardar manifiesto local y auditoría
             saveManualDispatch(manifestEntries);
+            const techCount = Object.keys(manifestEntries).length > 0 ? entries.length : 0;
+            await WorkflowService.logDispatchBatch(techCount, Object.keys(manifestEntries).length, { manifest: manifestEntries });
+
             mutateTickets();
-            alert('¡Despacho Publicado!');
+
+            window.dispatchEvent(new CustomEvent('app:toast', { detail: { id: 'publish-progress', message: `¡Despacho publicado! ${Object.keys(manifestEntries).length}/${total} tickets reasignados.`, type: 'success' } }));
         } catch (e) {
-            alert('Error al publicar despacho.');
-        } finally { setLoading(false); }
+            console.error('[handlePublish] Error:', e);
+            window.dispatchEvent(new CustomEvent('app:toast', { detail: { id: 'publish-progress', message: 'Error al publicar despacho. Revisa la consola.', type: 'error' } }));
+        } finally {
+            setLoading(false);
+        }
     };
 
     const calculateBounds = useCallback(() => {
-        const visible = filteredTickets.filter(t => neighborhoods[t.barrio]?.latitude);
-        if (visible.length === 0) return null;
-        return L.latLngBounds(visible.map(t => [Number(neighborhoods[t.barrio].latitude), Number(neighborhoods[t.barrio].longitude)]));
-    }, [filteredTickets, neighborhoods]);
+        const poolVisible = filteredTickets.filter(t => neighborhoods[t.barrio]?.latitude);
+        const assignedVisible = filterTechId !== 'all'
+            ? (assignedRoutes[filterTechId] || []).filter(t => neighborhoods[t.barrio]?.latitude)
+            : [];
+
+        const allVisible = [...poolVisible, ...assignedVisible];
+        if (allVisible.length === 0) return null;
+        return L.latLngBounds(allVisible.map(t => [Number(neighborhoods[t.barrio].latitude), Number(neighborhoods[t.barrio].longitude)]));
+    }, [filteredTickets, assignedRoutes, filterTechId, neighborhoods]);
 
     useEffect(() => {
         if (!mapRef.current || activeView !== 'dispatch') return;
@@ -533,14 +739,17 @@ export function OperationsDispatch() {
         );
     }
 
-    if (ticketsError) {
+    // Solo mostrar error fatal si tampoco hay datos en caché
+    if (ticketsError && (!mirrorData || mirrorData.length === 0)) {
         return (
             <div className="flex flex-col items-center justify-center min-h-[400px] gap-4 p-8 border-2 border-dashed border-destructive/20 rounded-[2rem] bg-destructive/5 text-center">
                 <AlertCircle className="w-12 h-12 text-destructive" />
+                <p className="text-xs text-destructive/70 font-medium">Error al conectar con el servidor de tickets.</p>
                 <button onClick={() => mutateTickets()} className="bg-destructive text-white px-6 py-2 rounded-xl font-black uppercase text-xs">Reintentar Conexión</button>
             </div>
         );
     }
+
 
     return (
         <div className="animate-in fade-in duration-700 h-full w-full overflow-hidden relative bg-slate-900">
@@ -585,6 +794,34 @@ export function OperationsDispatch() {
                                                     <div className="bg-primary/10 text-primary text-[10px] font-black py-2 px-3 rounded-xl border border-primary/20">
                                                         {data.count} Reportes activos
                                                     </div>
+                                                </div>
+                                            </Popup>
+                                        </Marker>
+                                    );
+                                })}
+
+                                {/* WAYPOINTS INDIVIDUALES PARA EL TÉCNICO SELECCIONADO */}
+                                {filterTechId !== 'all' && (assignedRoutes[filterTechId] || []).map((t, idx) => {
+                                    const lat = neighborhoods[t.barrio]?.latitude;
+                                    const lng = neighborhoods[t.barrio]?.longitude;
+                                    if (!lat || !lng) return null;
+
+                                    return (
+                                        <Marker
+                                            key={`tech-wp-${t.id}`}
+                                            position={[Number(lat), Number(lng)]}
+                                            icon={L.divIcon({
+                                                className: 'custom-div-icon',
+                                                html: `<div class="w-6 h-6 bg-primary text-white rounded-full border-2 border-white shadow-lg flex items-center justify-center text-[10px] font-black">${idx + 1}</div>`,
+                                                iconSize: [24, 24],
+                                                iconAnchor: [12, 12]
+                                            })}
+                                        >
+                                            <Popup>
+                                                <div className="p-2">
+                                                    <p className="text-[9px] font-black uppercase text-primary mb-0.5">ORDEN #${idx + 1}</p>
+                                                    <p className="text-[10px] font-bold text-slate-800">{t.nombre_cliente}</p>
+                                                    <p className="text-[8px] font-medium text-slate-500 mt-1 uppercase">{t.barrio}</p>
                                                 </div>
                                             </Popup>
                                         </Marker>
@@ -697,14 +934,28 @@ export function OperationsDispatch() {
                                             Centro de Despacho
                                         </h1>
                                     </div>
-                                    {isGlobalSyncing && (
+                                    {(isGlobalSyncing || isFullResyncing) && (
                                         <div className="flex items-center gap-1.5 mt-1 ml-1 px-2 py-0.5 bg-primary/5 rounded-full border border-primary/10 animate-pulse w-fit">
                                             <Loader2 className="w-2 h-2 animate-spin text-primary" />
-                                            <span className="text-[7px] font-black text-primary uppercase tracking-widest">Sincronizando Sistema</span>
+                                            <span className="text-[7px] font-black text-primary uppercase tracking-widest">
+                                                {isFullResyncing ? 'Re-Sincronización Profunda' : 'Sincronizando Sistema'}
+                                            </span>
                                         </div>
                                     )}
                                 </div>
                             </div>
+
+                            <button
+                                onClick={handleFullResync}
+                                disabled={isFullResyncing}
+                                title="Resincronización Profunda (Borra tickets fantasma)"
+                                className={clsx(
+                                    "p-2 rounded-xl border border-slate-200/50 bg-white/50 backdrop-blur-xl transition-all pointer-events-auto",
+                                    isFullResyncing ? "text-primary bg-primary/5 border-primary/20 animate-spin" : "text-slate-400 hover:text-primary hover:bg-white hover:border-slate-300"
+                                )}
+                            >
+                                <RefreshCw size={18} />
+                            </button>
 
                             <div className="flex items-center gap-6 pl-6 border-l border-slate-200/50">
                                 <div className="flex flex-col">
@@ -765,7 +1016,9 @@ export function OperationsDispatch() {
                             <button
                                 onClick={() => {
                                     if (confirm(`¿Cerrar Jornada de ${selectedDate}? Se limpiarán los borradores y el manifiesto local de este día.`)) {
+                                        localStorage.removeItem('dispatch_v1_assigned_routes');
                                         localStorage.removeItem('dispatch_draft_schedule_v1');
+                                        localStorage.removeItem('dispatch_manual_strict_v1');
                                         localStorage.removeItem(`dispatch_manifest_${selectedDate}`);
                                         setAssignedRoutes({});
                                         setDispatchManifest({});
@@ -867,7 +1120,7 @@ export function OperationsDispatch() {
                                                     )}
                                                 >
                                                     {filteredTickets.map((ticket, index) => (
-                                                        <Draggable key={ticket.id} draggableId={ticket.id} index={index}>
+                                                        <Draggable key={ticket.id} draggableId={String(ticket.id)} index={index}>
                                                             {(provided, snapshot) => {
                                                                 const content = (
                                                                     <div
@@ -954,16 +1207,12 @@ export function OperationsDispatch() {
                                     <div className="flex items-center gap-2">
                                         <button
                                             onClick={() => {
-                                                const today = getLocalToday();
-                                                localStorage.setItem('dispatch_draft_schedule_v1', JSON.stringify({
-                                                    date: today,
-                                                    routes: assignedRoutes
-                                                }));
-                                                alert('Borrador guardado localmente');
+                                                mutateTickets();
+                                                alert('Datos actualizados');
                                             }}
                                             className="px-3 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all bg-white/5 text-slate-400 hover:bg-white/10 hover:text-white border border-white/5"
                                         >
-                                            Borrador
+                                            Refrescar
                                         </button>
                                         <button
                                             onClick={handlePublish}
@@ -1004,7 +1253,7 @@ export function OperationsDispatch() {
                                                         </div>
                                                     </div>
 
-                                                    <Droppable droppableId={tech.id}>
+                                                    <Droppable droppableId={String(tech.id)}>
                                                         {(provided, snapshot) => (
                                                             <div
                                                                 {...provided.droppableProps}
@@ -1017,7 +1266,7 @@ export function OperationsDispatch() {
                                                                 )}
                                                             >
                                                                 {(assignedRoutes[tech.id] || []).map((ticket, index) => (
-                                                                    <Draggable key={ticket.id} draggableId={ticket.id} index={index}>
+                                                                    <Draggable key={ticket.id} draggableId={String(ticket.id)} index={index}>
                                                                         {(provided, snapshot) => {
                                                                             const content = (
                                                                                 <div

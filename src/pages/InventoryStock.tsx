@@ -38,14 +38,23 @@ export default function InventoryStock() {
 
                 const { data: assetData } = await supabase
                     .from('inventory_assets')
-                    .select('item_id, status');
+                    .select('item_id, status, quantity');
 
                 const stocks: Record<string, { total: number, serialized: number }> = {};
                 itemData.forEach(item => {
                     const itemAssets = assetData?.filter(a => a.item_id === item.id) || [];
+
+                    // [FIX] Calcular stock basado en:
+                    // - Si es serializado: Conteo de filas (cada asset es 1 unidad)
+                    // - Si NO es serializado: Suma de la columna 'quantity' (cada asset es un lote)
+                    // - Fallback: Si quantity es null, asumimos 1.
+                    const totalQuantity = itemAssets.reduce((sum, asset) => {
+                        return sum + (asset.quantity || 1);
+                    }, 0);
+
                     stocks[item.id] = {
-                        total: itemAssets.length,
-                        serialized: itemAssets.length
+                        total: totalQuantity,
+                        serialized: itemAssets.length // Esto mantiene el conteo de "lotes/filas"
                     };
                 });
                 setItemStocks(stocks);
@@ -70,31 +79,98 @@ export default function InventoryStock() {
         setIsSaving(true);
 
         const formData = new FormData(e.currentTarget);
-        const serialsRaw = formData.get('serials') as string;
         const notes = formData.get('notes') as string;
 
-        const assetEntries = serialsRaw.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
-
         try {
-            // First, insert assets
-            const assetsToInsert = assetEntries.map(serial => ({
-                item_id: selectedItemForStock.id,
-                serial_number: serial,
-                status: 'warehouse'
-            }));
+            let assetsToTrack: any[] = [];
+            let entryCount = 0;
 
-            const { data: insertedAssets, error: assetError } = await supabase
-                .from('inventory_assets')
-                .insert(assetsToInsert)
-                .select();
+            // 1. Logic Selection
+            if (selectedItemForStock.is_serialized) {
+                // Lógica Original: Lista de Seriales
+                const serialsRaw = formData.get('serials') as string;
+                const assetEntries = serialsRaw.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
 
-            if (assetError) throw assetError;
+                const assetsToInsert = assetEntries.map(serial => ({
+                    item_id: selectedItemForStock.id,
+                    serial_number: serial,
+                    status: 'warehouse',
+                    quantity: 1
+                }));
+                entryCount = assetsToInsert.length;
 
-            // Now insert movements for each inserted asset
-            const movementsToInsert = (insertedAssets as any[]).map(asset => ({
+                // Insert Assets
+                const { data: insertedAssets, error: assetError } = await supabase
+                    .from('inventory_assets')
+                    .insert(assetsToInsert)
+                    .select();
+
+                if (assetError) throw assetError;
+
+                // Track for movement logging
+                assetsToTrack = insertedAssets;
+
+            } else {
+                // Nueva Lógica: Cantidad Directa (Lotes) -> CONSOLIDACIÓN
+                const quantityStr = formData.get('quantity') as string;
+                const quantity = parseInt(quantityStr, 10);
+
+                if (isNaN(quantity) || quantity <= 0) {
+                    throw new Error("La cantidad debe ser mayor a 0");
+                }
+                entryCount = quantity;
+
+                // Check for EXISTING warehouse asset for this item
+                const { data: existingAssets, error: fetchError } = await supabase
+                    .from('inventory_assets')
+                    .select('*')
+                    .eq('item_id', selectedItemForStock.id)
+                    .eq('status', 'warehouse')
+                    .limit(1);
+
+                if (fetchError) throw fetchError;
+
+                if (existingAssets && existingAssets.length > 0) {
+                    // UPDATE existing asset
+                    const existingAsset = existingAssets[0];
+                    const newQuantity = (existingAsset.quantity || 0) + quantity;
+
+                    const { data: updatedAsset, error: updateError } = await supabase
+                        .from('inventory_assets')
+                        .update({ quantity: newQuantity })
+                        .eq('id', existingAsset.id)
+                        .select()
+                        .single();
+
+                    if (updateError) throw updateError;
+                    assetsToTrack = [updatedAsset]; // Track for movement
+                } else {
+                    // INSERT new asset (First time)
+                    const lotSerial = `LOTE-${Date.now()}`;
+                    const { data: insertedAsset, error: insertError } = await supabase
+                        .from('inventory_assets')
+                        .insert([{
+                            item_id: selectedItemForStock.id,
+                            serial_number: lotSerial,
+                            status: 'warehouse',
+                            quantity: quantity
+                        }])
+                        .select()
+                        .single();
+
+                    if (insertError) throw insertError;
+                    assetsToTrack = [insertedAsset];
+                }
+            }
+
+            // 2. Insert Movements (using assetsToTrack)
+            const { data: { user } } = await supabase.auth.getUser();
+            const movementsToInsert = assetsToTrack.map(asset => ({
                 asset_id: asset.id,
                 movement_type: 'entry',
-                notes: `Entrada inicial: ${notes}`
+                notes: `Entrada: ${notes}`,
+                quantity: selectedItemForStock.is_serialized ? 1 : entryCount, // Log the added amount, not the total
+                created_by: user?.id
             }));
 
             const { data: moveData, error: moveError } = await supabase
@@ -104,8 +180,11 @@ export default function InventoryStock() {
 
             if (moveError) throw moveError;
 
-            // Update assets with their last_movement_id
-            const updatePromises = (moveData as any[]).map(move => {
+            // 3. Update Assets with Movement ID (Only for new inserts or if we want to track last movement)
+            // For merged assets, updating last_movement_id is fine/good.
+            // But we can't do it in bulk easy if we mixed update/insert.
+            // Actually, we just have 'assetsToTrack' which are the ones we touched.
+            const updatePromises = moveData.map(move => {
                 return supabase
                     .from('inventory_assets')
                     .update({ last_movement_id: move.id })
@@ -113,7 +192,9 @@ export default function InventoryStock() {
             });
             await Promise.all(updatePromises);
 
-            showToast(`${assetEntries.length} equipos registrados correctamente`, 'success');
+
+
+            showToast(`${entryCount} unidades registradas correctamente`, 'success');
             setIsMovementModalOpen(false);
             loadStockData();
         } catch (err: any) {
@@ -240,20 +321,38 @@ export default function InventoryStock() {
                         <div className="space-y-1">
                             <p className="text-xs font-black text-primary uppercase">Guía de Importación</p>
                             <p className="text-[10px] text-muted-foreground leading-relaxed">
-                                Pega los Seriales o MACs uno por línea. Cada uno se registrará como un equipo único en bodega disponible para asignación.
+                                {selectedItemForStock?.is_serialized ? (
+                                    "Pega los Seriales o MACs uno por línea. Cada uno se registrará como un equipo único en bodega disponible para asignación."
+                                ) : (
+                                    "Este producto no requiere seriales individuales. Ingresa la cantidad total a agregar al inventario."
+                                )}
                             </p>
                         </div>
                     </div>
 
-                    <div className="space-y-1">
-                        <label className="text-[10px] font-black uppercase text-muted-foreground ml-1">Lista de Seriales / MACs</label>
-                        <textarea
-                            name="serials"
-                            required
-                            placeholder="SN123456...&#10;SN789012..."
-                            className="w-full bg-muted/30 border border-border rounded-xl p-4 text-sm font-mono focus:ring-2 focus:ring-primary/20 outline-none h-48 resize-none"
-                        />
-                    </div>
+                    {selectedItemForStock?.is_serialized ? (
+                        <div className="space-y-1">
+                            <label className="text-[10px] font-black uppercase text-muted-foreground ml-1">Lista de Seriales / MACs</label>
+                            <textarea
+                                name="serials"
+                                required
+                                placeholder="SN123456...&#10;SN789012..."
+                                className="w-full bg-muted/30 border border-border rounded-xl p-4 text-sm font-mono focus:ring-2 focus:ring-primary/20 outline-none h-48 resize-none"
+                            />
+                        </div>
+                    ) : (
+                        <div className="space-y-1">
+                            <label className="text-[10px] font-black uppercase text-muted-foreground ml-1">Cantidad a Ingresar</label>
+                            <input
+                                type="number"
+                                name="quantity"
+                                required
+                                min="1"
+                                placeholder="0"
+                                className="w-full bg-muted/30 border border-border rounded-xl p-4 text-2xl font-black text-center focus:ring-2 focus:ring-primary/20 outline-none"
+                            />
+                        </div>
+                    )}
 
                     <div className="space-y-1">
                         <label className="text-[10px] font-black uppercase text-muted-foreground ml-1">Observaciones</label>

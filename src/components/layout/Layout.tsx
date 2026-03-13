@@ -1,42 +1,31 @@
 import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom';
-import { supabase } from '../../lib/supabase';
+import { supabase, safeGetUser } from '../../lib/supabase';
 import {
-    LayoutDashboard,
-    Kanban,
-    FileText,
     LogOut,
-    Calendar,
-    Phone,
-    Settings,
-    History,
     Moon,
     Sun,
-    Megaphone,
     ChevronDown,
     ChevronUp,
     User as UserIcon,
-    Shield,
-    Clock,
     Search as SearchIcon,
-    BarChart3,
-    ClipboardList,
-    ShieldAlert,
     Menu,
     Loader2,
     UserPlus,
-    Activity,
-    Box,
-    Package,
-    Truck
+    ShieldAlert,
+    Bell,
+    CheckCircle2,
+    Info,
+    AlertTriangle
 } from 'lucide-react';
+import { NAV_GROUPS } from '../../config/menu';
 import { WisphubService, type WispHubClient } from '../../lib/wisphub';
 import { NotificationService, type Notification } from '../../lib/notifications';
+import { WorkflowService } from '../../lib/workflowService';
 import clsx from 'clsx';
 import { useState, useEffect, useRef } from 'react';
 import { MobileSidebar } from './MobileSidebar';
 import { formatDistanceToNow } from 'date-fns';
 import { es } from 'date-fns/locale';
-import { Bell, CheckCircle2, Info, AlertTriangle } from 'lucide-react';
 
 interface Toast {
     id: string;
@@ -134,41 +123,6 @@ function SidebarContent({
                         </div>
                     );
                 })}
-
-                {/* Admin Section */}
-                {isAdmin && (
-                    <div className="space-y-1">
-                        <button
-                            onClick={() => toggleGroup('Administración')}
-                            className={clsx(
-                                "w-full flex items-center justify-between px-4 py-3 rounded-xl text-sm font-medium transition-all duration-200 group",
-                                location.pathname === '/configuracion' ? "text-white font-semibold" : "text-gray-400 hover:bg-white/10 hover:text-white"
-                            )}
-                        >
-                            <div className="flex items-center gap-4">
-                                <Settings className="w-5 h-5 transition-transform group-hover:scale-110" />
-                                <span>Administración</span>
-                            </div>
-                            {expandedGroups['Administración'] ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                        </button>
-                        {expandedGroups['Administración'] && (
-                            <div className="ml-4 pl-4 border-l border-white/5 py-1 animate-in fade-in slide-in-from-top-2 duration-200">
-                                <NavLink
-                                    to="/configuracion"
-                                    className={({ isActive }) =>
-                                        clsx(
-                                            "flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm transition-all duration-200",
-                                            isActive ? "text-white font-semibold flex items-center gap-3" : "text-gray-500 hover:text-gray-300 flex items-center gap-3"
-                                        )
-                                    }
-                                >
-                                    <Settings className="w-4 h-4" />
-                                    <span>Configuración</span>
-                                </NavLink>
-                            </div>
-                        )}
-                    </div>
-                )}
             </nav>
 
             {/* Profile Footer */}
@@ -208,6 +162,7 @@ export function Layout() {
     const [isAdmin, setIsAdmin] = useState(false);
     const [userEmail, setUserEmail] = useState<string | null>(null);
     const [allowedMenus, setAllowedMenus] = useState<string[]>(["Dashboard"]);
+    const [profileLoaded, setProfileLoaded] = useState(false);
     const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({
         'Escalamiento': true,
         'Gestión Operativa': true,
@@ -271,9 +226,13 @@ export function Layout() {
 
             supabase.auth.getSession().then(({ data: { session } }) => {
                 if (session?.user) {
+                    // TODO: Re-enable Realtime when server supports WSS (WebSocket)
+                    // Currently disabled to prevent console errors on VPS deployment without WSS support.
+                    /*
                     subscription = NotificationService.subscribeToNotifications(session.user.id, (newNotif) => {
                         setNotifications(prev => [newNotif, ...prev]);
                     });
+                    */
                 }
             });
 
@@ -306,17 +265,40 @@ export function Layout() {
 
     useEffect(() => {
         checkCriticalTickets();
-        const interval = setInterval(checkCriticalTickets, 300000); // Check every 5 mins
-        return () => clearInterval(interval);
+
+        // --- REALTIME ALERTS ---
+        const channel = supabase
+            .channel('global_sla_alerts')
+            .on(
+                'postgres_changes',
+                {
+                    event: '*',
+                    schema: 'public',
+                    table: 'workflow_processes',
+                    filter: 'process_type=eq.Ticket AXCES'
+                },
+                () => {
+                    console.log('[Layout-Realtime] 🔄 Cambio en tickets. Re-evaluando SLAs...');
+                    checkCriticalTickets();
+                }
+            )
+            .subscribe();
+
+        return () => {
+            supabase.removeChannel(channel);
+        };
     }, []);
 
     const checkCriticalTickets = async () => {
         try {
-            const tickets = await WisphubService.getAllTickets();
-            const critical = tickets.filter(t =>
+            // Usamos el espejo local en lugar de la API externa
+            const tickets = await WorkflowService.getOperationalTicketsMirror();
+
+            const critical = tickets.filter((t: any) =>
                 t.sla_status === 'critico' &&
-                (Number(t.id_estado) === 1 || Number(t.id_estado) === 2)
+                (Number(t.id_estado) === 1 || Number(t.id_estado) === 2 || Number(t.id_estado) === 5)
             );
+
             setHasCriticalTickets(critical.length > 0);
 
             // Generar notificaciones para tickets críticos si no existen
@@ -359,23 +341,34 @@ export function Layout() {
     }, []);
 
     const checkUser = async () => {
-        const { data: { user } } = await supabase.auth.getUser();
-        if (user) {
-            setUserEmail(user.email || null);
-            if (user.user_metadata?.role === 'admin') {
-                setIsAdmin(true);
-            }
+        try {
+            const { data: { user }, error } = await safeGetUser();
+            if (error) throw error;
+            if (user) {
+                setUserEmail(user.email || null);
+                if (user.user_metadata?.role === 'admin') {
+                    setIsAdmin(true);
+                }
 
-            // Load Menu Permissions from Profile
-            const { data: profile } = await supabase
-                .from('profiles')
-                .select('allowed_menus')
-                .eq('id', user.id)
-                .single();
+                // Load Menu Permissions from Profile
+                const { data: profile, error: profileError } = await supabase
+                    .from('profiles')
+                    .select('allowed_menus')
+                    .eq('id', user.id)
+                    .maybeSingle();
 
-            if (profile?.allowed_menus) {
-                setAllowedMenus(profile.allowed_menus);
+                if (profileError) {
+                    if (profileError.message?.includes('aborted')) return;
+                    throw profileError;
+                }
+
+                if (profile?.allowed_menus) {
+                    setAllowedMenus(profile.allowed_menus);
+                }
+                setProfileLoaded(true);
             }
+        } catch (e) {
+            console.error('[Layout:Auth] ❌ Error en checkUser:', e);
         }
     };
 
@@ -426,55 +419,43 @@ export function Layout() {
         navigate('/gestion', { state: { selectedClient: client } });
     };
 
-    const navGroups = [
-        {
-            title: 'Escalamiento',
-            icon: Activity,
-            items: [
-                { to: '/operaciones/mis-tareas', icon: ClipboardList, label: 'Mis Tareas' },
-                { to: '/operaciones/supervision', icon: ShieldAlert, label: 'Supervisión' },
-            ]
-        },
-        {
-            title: 'Gestión Operativa',
-            icon: Shield,
-            items: [
-                { to: '/operaciones/despacho', icon: Truck, label: 'Despacho Inteligente' },
-                { to: '/operaciones/productividad', icon: BarChart3, label: 'Productividad' },
-                { to: '/operaciones/trazabilidad', icon: Clock, label: 'Control de Trazabilidad' },
-            ]
-        },
-        {
-            title: 'Gestión Comercial',
-            icon: Megaphone,
-            items: [
-                { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
-                { to: '/campanas', icon: Megaphone, label: 'Gestor de Campañas' },
-                { to: '/pipeline', icon: Kanban, label: 'Pipeline' },
-                { to: '/gestion', icon: Phone, label: 'Gestión Manual' },
-                { to: '/historial', icon: History, label: 'Historial' },
-            ]
-        },
-        {
-            title: 'Inventario',
-            icon: Box,
-            items: [
-                { to: '/operaciones/inventario', icon: LayoutDashboard, label: 'Dashboard' },
-                { to: '/operaciones/inventario/stock', icon: Package, label: 'Existencias y Entradas' },
-                { to: '/operaciones/inventario/asignaciones', icon: Truck, label: 'Entrega a Técnicos' },
-                { to: '/operaciones/inventario/catalogo', icon: Box, label: 'Catálogo Maestro' },
-                { to: '/operaciones/inventario/escaner', icon: SearchIcon, label: 'Consultar Serial' },
-            ]
-        },
-        {
-            title: 'Reportes',
-            icon: FileText,
-            items: [
-                { to: '/reportes/diario', icon: FileText, label: 'Reportes Diarios' },
-                { to: '/reportes/semanal', icon: Calendar, label: 'Reporte Semanal' },
-            ]
+    const navGroups = NAV_GROUPS.map(group => ({
+        ...group,
+        items: group.items.filter(item => {
+            // Si es admin total, ve todo lo que no sea adminOnly (que se filtra abajo)
+            // o si el grupo/ítem está explícitamente permitido
+            if (isAdmin) return true;
+
+            // Verificamos si el título del grupo o la etiqueta del ítem están permitidos
+            // Esto mantiene compatibilidad con el sistema actual basado en nombres
+            return allowedMenus.includes(group.title) || allowedMenus.includes(item.label);
+        })
+    })).filter(group => {
+        // Regla de oro: Si es solo admin y no eres admin, fuera.
+        if (group.adminOnly && !isAdmin) return false;
+        // Si el grupo se quedó sin ítems permitidos, no lo mostramos.
+        return group.items.length > 0;
+    });
+
+    // Regla de Protección: Redirección si la ruta no está permitida
+    useEffect(() => {
+        if (!profileLoaded) return; // Esperar a que el perfil cargue
+
+        const currentPath = location.pathname;
+        if (currentPath === '/' || currentPath === '/login' || isAdmin) return;
+
+        const allAllowedPaths = navGroups.flatMap((g: any) => g.items.map((i: any) => i.to));
+
+        // Verificación flexible (por ejemplo, permitir sub-rutas de Inventario si el módulo está activo)
+        const isAllowed = allAllowedPaths.some((path: string) =>
+            currentPath === path || currentPath.startsWith(path + '/')
+        );
+
+        if (!isAllowed) {
+            console.warn(`Acceso denegado a ${currentPath}. Redirigiendo...`);
+            navigate('/');
         }
-    ].filter(group => allowedMenus.includes(group.title));
+    }, [location.pathname, navGroups, isAdmin, profileLoaded]);
 
 
     return (

@@ -3,7 +3,8 @@ import {
     Plus,
     Trash2,
     Save,
-    Loader2
+    Loader2,
+    Package
 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { Modal } from '../ui/Modal';
@@ -18,7 +19,11 @@ export function AssetRegistrationModal({ isOpen, onClose, onSuccess }: AssetRegi
     const [items, setItems] = useState<any[]>([]);
     const [selectedItemId, setSelectedItemId] = useState('');
     const [serials, setSerials] = useState<string[]>(['']);
+    const [quantity, setQuantity] = useState<number>(1);
     const [isSaving, setIsSaving] = useState(false);
+
+    const selectedItem = items.find(i => i.id === selectedItemId);
+    const isSerialized = selectedItem?.is_serialized ?? true;
 
     useEffect(() => {
         if (isOpen) {
@@ -48,16 +53,37 @@ export function AssetRegistrationModal({ isOpen, onClose, onSuccess }: AssetRegi
 
     const handleSave = async () => {
         if (!selectedItemId) return showToast('Selecciona un producto', 'error');
-        if (serials.some(s => !s)) return showToast('Completa todos los seriales', 'error');
+
+        if (isSerialized) {
+            if (serials.some(s => !s)) return showToast('Completa todos los seriales', 'error');
+        } else {
+            if (quantity <= 0) return showToast('Ingresa una cantidad válida', 'error');
+        }
 
         setIsSaving(true);
         try {
-            const payload = serials.map(sn => ({
-                item_id: selectedItemId,
-                serial_number: sn,
-                status: 'warehouse',
-                current_location: 'OFICINA CENTRAL'
-            }));
+            let payload: any[] = [];
+
+            if (isSerialized) {
+                payload = serials.map(sn => ({
+                    item_id: selectedItemId,
+                    serial_number: sn,
+                    quantity: 1,
+                    status: 'warehouse',
+                    current_location: 'OFICINA CENTRAL'
+                }));
+            } else {
+                // For non-serialized, we use a single record with the total quantity
+                // We generate a deterministic serial for the batch to avoid constraint issues if many batches exist
+                // Or we can just use a timestamp based unique ID
+                payload = [{
+                    item_id: selectedItemId,
+                    serial_number: `GEN-${selectedItemId.substring(0, 8)}-${Date.now()}`,
+                    quantity: quantity,
+                    status: 'warehouse',
+                    current_location: 'OFICINA CENTRAL'
+                }];
+            }
 
             const { error } = await supabase.from('inventory_assets').insert(payload);
             if (error) {
@@ -65,10 +91,16 @@ export function AssetRegistrationModal({ isOpen, onClose, onSuccess }: AssetRegi
                 throw error;
             }
 
-            showToast(`${serials.length} activos registrados correctamente`, 'success');
+            showToast(
+                isSerialized
+                    ? `${serials.length} activos registrados correctamente`
+                    : `Carga de ${quantity} unidades registrada correctamente`,
+                'success'
+            );
             onSuccess();
             onClose();
             setSerials(['']);
+            setQuantity(1);
         } catch (err: any) {
             showToast(err.message || 'Error al registrar activos', 'error');
         } finally {
@@ -77,7 +109,7 @@ export function AssetRegistrationModal({ isOpen, onClose, onSuccess }: AssetRegi
     };
 
     return (
-        <Modal isOpen={isOpen} onClose={onClose} title="Entrada de Stock (Seriales)">
+        <Modal isOpen={isOpen} onClose={onClose} title={isSerialized ? "Entrada de Stock (Seriales)" : "Entrada de Stock (Consumible)"}>
             <div className="space-y-6">
                 <div className="space-y-2">
                     <label className="text-[10px] font-black uppercase text-muted-foreground ml-1">Seleccionar Producto Maestro</label>
@@ -91,41 +123,62 @@ export function AssetRegistrationModal({ isOpen, onClose, onSuccess }: AssetRegi
                     </select>
                 </div>
 
-                <div className="space-y-4">
-                    <label className="text-[10px] font-black uppercase text-muted-foreground ml-1 flex justify-between">
-                        Números de Serie (SN)
-                        <span>{serials.length} unidades</span>
-                    </label>
+                {selectedItemId && (
+                    isSerialized ? (
+                        <div className="space-y-4 animate-in fade-in duration-300">
+                            <label className="text-[10px] font-black uppercase text-muted-foreground ml-1 flex justify-between">
+                                Números de Serie (SN)
+                                <span>{serials.length} unidades</span>
+                            </label>
 
-                    <div className="max-h-60 overflow-y-auto space-y-2 pr-2 custom-scrollbar">
-                        {serials.map((sn, idx) => (
-                            <div key={idx} className="flex gap-2 animate-in slide-in-from-right-2 duration-200">
-                                <input
-                                    value={sn}
-                                    onChange={(e) => handleSerialChange(idx, e.target.value)}
-                                    placeholder={`Serial #${idx + 1}`}
-                                    className="flex-1 bg-muted/20 border border-border rounded-xl p-3 text-sm focus:ring-1 focus:ring-primary outline-none font-mono"
-                                />
-                                {serials.length > 1 && (
-                                    <button
-                                        onClick={() => handleRemoveSerial(idx)}
-                                        className="p-3 text-muted-foreground hover:text-red-500 hover:bg-red-500/5 rounded-xl transition-all"
-                                    >
-                                        <Trash2 className="w-5 h-5" />
-                                    </button>
-                                )}
+                            <div className="max-h-60 overflow-y-auto space-y-2 pr-2 custom-scrollbar">
+                                {serials.map((sn, idx) => (
+                                    <div key={idx} className="flex gap-2 animate-in slide-in-from-right-2 duration-200">
+                                        <input
+                                            value={sn}
+                                            onChange={(e) => handleSerialChange(idx, e.target.value)}
+                                            placeholder={`Serial #${idx + 1}`}
+                                            className="flex-1 bg-muted/20 border border-border rounded-xl p-3 text-sm focus:ring-1 focus:ring-primary outline-none font-mono"
+                                        />
+                                        {serials.length > 1 && (
+                                            <button
+                                                onClick={() => handleRemoveSerial(idx)}
+                                                className="p-3 text-muted-foreground hover:text-red-500 hover:bg-red-500/5 rounded-xl transition-all"
+                                            >
+                                                <Trash2 className="w-5 h-5" />
+                                            </button>
+                                        )}
+                                    </div>
+                                ))}
                             </div>
-                        ))}
-                    </div>
 
-                    <button
-                        onClick={handleAddSerial}
-                        className="w-full py-3 bg-muted/50 border-2 border-dashed border-border rounded-xl text-xs font-black uppercase text-muted-foreground hover:border-primary/50 hover:text-primary transition-all flex items-center justify-center gap-2"
-                    >
-                        <Plus className="w-4 h-4" />
-                        Añadir otro serial
-                    </button>
-                </div>
+                            <button
+                                onClick={handleAddSerial}
+                                className="w-full py-3 bg-muted/50 border-2 border-dashed border-border rounded-xl text-xs font-black uppercase text-muted-foreground hover:border-primary/50 hover:text-primary transition-all flex items-center justify-center gap-2"
+                            >
+                                <Plus className="w-4 h-4" />
+                                Añadir otro serial
+                            </button>
+                        </div>
+                    ) : (
+                        <div className="space-y-4 animate-in fade-in duration-300">
+                            <label className="text-[10px] font-black uppercase text-muted-foreground ml-1">Cantidad a Ingresar</label>
+                            <div className="flex items-center gap-4 bg-primary/5 p-6 rounded-3xl border-2 border-primary/10">
+                                <Package size={32} className="text-primary opacity-50" />
+                                <div className="flex-1 transition-all">
+                                    <input
+                                        type="number"
+                                        value={quantity}
+                                        onChange={(e) => setQuantity(Number(e.target.value))}
+                                        className="w-full bg-transparent border-none text-4xl font-black focus:ring-0 p-0 text-primary"
+                                        placeholder="0"
+                                    />
+                                    <p className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest mt-1">Metraje o Unidades Totales</p>
+                                </div>
+                            </div>
+                        </div>
+                    )
+                )}
 
                 <div className="flex gap-3 pt-4">
                     <button

@@ -30,25 +30,53 @@ import InventoryRMA from './pages/InventoryRMA';
 import InventoryAudit from './pages/InventoryAudit';
 import InventoryAnalytics from './pages/InventoryAnalytics';
 import InventorySlips from './pages/InventorySlips';
+import InventoryMovements from './pages/InventoryMovements';
+import { VoiceCampaigns } from './pages/VoiceCampaigns';
 
 function App() {
   const [session, setSession] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      setLoading(false);
-    });
+    // 1. Obtener la sesión de forma segura
+    supabase.auth.getSession()
+      .then(({ data: { session }, error }) => {
+        if (error) console.error('[App:Auth] ❌ Error al obtener sesión inicial:', error);
+        setSession(session);
+      })
+      .catch(err => {
+        console.error('[App:Auth] 💥 Error fatal pidiendo sesión:', err);
+      })
+      .finally(() => {
+        setLoading(false); // Siempre quitar cargando, pase lo que pase
+      });
 
+    // 2. Suscribirse a cambios
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session);
+    } = supabase.auth.onAuthStateChange((event, newSession) => {
+      console.log(`[App:Auth] 🔑 Evento: ${event}`, newSession?.user?.email || 'Sin sesión');
+
+      if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'INITIAL_SESSION' || event === 'USER_UPDATED') {
+        if (newSession) setSession(newSession);
+      } else if (event === 'SIGNED_OUT') {
+        // SEGURIDAD ANTI-500 RELAJADA: Solo retener la memoria si EL TOKEN TODAVÍA EXISTE REALMENTE.
+        // Si Supabase lo borró (porque está corrupto o se cerró sesión intencionalmente), cedemos.
+        const token = localStorage.getItem('sb-rapilink-auth-token');
+        if (!token) {
+          console.warn('[App:Auth] 🚪 Cierre de sesión confirmado (token no existe).');
+          setSession(null);
+        } else {
+          console.warn('[App:Auth] 🛡️ Ignorando SIGNED_OUT sospechoso. Token local aún sobrevive.');
+        }
+      }
     });
 
-    return () => subscription.unsubscribe();
+    return () => {
+      subscription.unsubscribe();
+    };
   }, []);
+
 
   if (loading) {
     return <div className="flex items-center justify-center h-screen bg-background text-foreground">Cargando...</div>;
@@ -88,6 +116,8 @@ function App() {
           <Route path="/operaciones/inventario/auditoria" element={<InventoryAudit />} />
           <Route path="/operaciones/inventario/analiticas" element={<InventoryAnalytics />} />
           <Route path="/operaciones/inventario/actas" element={<InventorySlips />} />
+          <Route path="/operaciones/inventario/movimientos" element={<InventoryMovements />} />
+          <Route path="/voice-ai" element={<VoiceCampaigns />} />
           <Route path="/pipeline" element={<Pipeline />} />
           <Route path="/historial" element={<InteractionHistory />} />
           <Route path="/gestion/cerrar" element={<DailyReportGenerator />} />

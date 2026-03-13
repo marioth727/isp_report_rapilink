@@ -1,3 +1,5 @@
+import { supabase, safeGetUser } from './supabase';
+
 export interface WispHubClient {
     id_servicio: number;
     nombre: string;
@@ -57,10 +59,12 @@ export const TICKET_SUBJECTS = [
 ];
 
 const FALLBACK_TECHNICIANS: WispHubStaff[] = [
+    { id: "sistemas@rapilink-sas", nombre: "SISTEMAS RAPILINK", usuario: "sistemas@rapilink-sas", nivel: "Administrador" },
     { id: "tecnico4@rapilink-sas", nombre: "TOMAS MCAUSLAND", usuario: "tecnico4@rapilink-sas", nivel: "Técnico" },
     { id: "asistente.administrativa1@rapilink-sas", nombre: "VALENTINA SUAREZ", usuario: "asistente.administrativa1@rapilink-sas", nivel: "Técnico" },
     { id: "tecnico1@rapilink-sas", nombre: "ALEXANDER GOMEZ", usuario: "tecnico1@rapilink-sas", nivel: "Técnico" },
-    { id: "asistente.administravo.3@rapilink-sas", nombre: "VANESSA BARRERA", usuario: "asistente.administravo.3@rapilink-sas", nivel: "Técnico" }
+    { id: "asistente.administravo.3@rapilink-sas", nombre: "VANESSA BARRERA", usuario: "asistente.administravo.3@rapilink-sas", nivel: "Técnico" },
+    { id: "instalaciones@rapilink-sas", nombre: "INSTALACIONES APROBADAS", usuario: "instalaciones@rapilink-sas", nivel: "Técnico", email: "instalaciones@gmail.com" }
 ];
 
 let GLOBAL_CLIENT_CACHE: WispHubClient[] | null = null;
@@ -78,7 +82,6 @@ export async function safeFetch(url: string, options: RequestInit = {}, retries 
     const proxyUrl = toProxyUrl(url) || url;
     for (let i = 0; i <= retries; i++) {
         try {
-            // Asegurar cabeceras de API si no están presentes
             const finalOptions: RequestInit = {
                 ...options,
                 headers: {
@@ -90,32 +93,33 @@ export async function safeFetch(url: string, options: RequestInit = {}, retries 
             const res = await fetch(proxyUrl, finalOptions);
             if (res.ok) return res;
 
-            let errorBody = 'Unable to parse body';
-            if (!silent) {
-                try {
-                    const clonedRes = res.clone();
-                    errorBody = await clonedRes.text();
-                    console.warn(`[WispHub] Raw error body details: ${errorBody}`);
-                } catch (bodyError) {
-                    console.warn(`[WispHub] Body capture failed: ${bodyError}`);
-                }
+            let errorBody = '';
+            try {
+                const clonedRes = res.clone();
+                errorBody = await clonedRes.text();
+            } catch (e) {
+                errorBody = '(No se pudo leer el cuerpo del error)';
             }
 
             if (!silent) {
-                console.error(`[WispHub API ERROR] URL: ${proxyUrl} Status: ${res.status} Attempt: ${i + 1}/${retries + 1}`);
-            } else {
-                // Debug log to ensure silent mode is working
-                // console.log(`[WispHub Silent] 404 on ${proxyUrl}`);
+                console.error(`[WispHub API ERROR] 
+URL: ${proxyUrl} 
+Status: ${res.status} 
+Body: ${errorBody.substring(0, 500)}
+Attempt: ${i + 1}/${retries + 1}`);
             }
 
-            if (res.status === 404 || res.status === 401 || res.status === 403 || res.status === 400) return res;
+            // Si es 500, no reintentamos si ya falló 2 veces y es un error persistente de servidor
+            if (res.status >= 500 && i === retries) return res;
+
+            // 404, 401, 403, 400 son errores finales de cliente, no reintentamos
+            if (res.status < 500 && res.status !== 429) return res;
 
         } catch (e) {
             if (!silent) console.error(`[WispHub FETCH EXCEPTION] URL: ${proxyUrl} Error: ${e}`);
         }
         if (i < retries) await new Promise(r => setTimeout(r, 1000 * (i + 1)));
     }
-    if (!silent) throw new Error(`Failed to fetch ${proxyUrl} after ${retries + 1} attempts`);
     return new Response(null, { status: 500 });
 }
 
@@ -142,6 +146,7 @@ export function whNormalize(text: string | null | undefined): string {
         .replace(/\s+/g, " ");          // Colapsar espacios múltiples
 }
 
+
 export const WisphubService = {
     async getStaff(): Promise<WispHubStaff[]> {
         if (GLOBAL_STAFF_CACHE) return GLOBAL_STAFF_CACHE;
@@ -149,21 +154,35 @@ export const WisphubService = {
 
         STAFF_PROMISE = (async () => {
             try {
-                const response = await safeFetch(`${BASE_URL}/staff/?limit=1000`);
-                if (!response.ok) return FALLBACK_TECHNICIANS;
-                const data = await response.json();
-                const staff = data.results || data || [];
-                const mapped = staff.map((s: any) => ({
-                    id: s.id || s.id_usuario,
+                console.log('[WisphubService] 🔍 Obteniendo staff desde Espejo Local (Supabase)...');
+
+                const { data, error } = await supabase
+                    .from('wisphub_staff')
+                    .select('id, nombre, usuario, email, nivel');
+
+                if (error) {
+                    console.warn('[WisphubService] ⚠️ Falló consulta a espejo local, usando fallback:', error.message);
+                    return FALLBACK_TECHNICIANS;
+                }
+
+                if (!data || data.length === 0) {
+                    console.warn('[WisphubService] ⚠️ Espejo local vacío o inalcanzable, usando fallback.');
+                    return FALLBACK_TECHNICIANS;
+                }
+
+                const mapped = data.map((s: any) => ({
+                    id: s.id,
                     nombre: s.nombre,
-                    usuario: s.usuario || s.username || s.email,
-                    email: s.email || s.email_usuario || '',
+                    usuario: s.usuario || '',
+                    email: s.email || '',
                     nivel: s.nivel || 'Desconocido'
                 }));
+
+                console.log(`[WisphubService] ✅ Staff cargado desde espejo: ${mapped.length} registros`);
                 GLOBAL_STAFF_CACHE = mapped;
                 return mapped;
             } catch (error) {
-                console.error('[WisphubService] Staff Fetch Failed:', error);
+                console.error('[WisphubService] 💥 Error crítico al obtener staff mirror:', error);
                 return FALLBACK_TECHNICIANS;
             } finally {
                 STAFF_PROMISE = null;
@@ -481,7 +500,10 @@ export const WisphubService = {
 
             if (!response || !response.ok) {
                 SUBJECTS_FETCH_FAILED = true;
-                console.info('[WispHub] Usando catálogo de asuntos local (API no disponible).');
+                // Silent failure: Don't flood console with 404s for subjects if that's the error
+                if (response?.status !== 404) {
+                    console.info('[WispHub] Usando catálogo de asuntos local (API no disponible).');
+                }
                 return TICKET_SUBJECTS;
             }
 
@@ -576,7 +598,7 @@ export const WisphubService = {
             const pageSize = 50;
             let baseUrl = `${BASE_URL}/tickets/?limit=${pageSize}&offset=0&ordering=-id`;
 
-            if (filters?.status) {
+            if (filters?.status && !filters.status.includes(',')) {
                 baseUrl += `&id_estado=${filters.status}`;
             }
 
@@ -621,7 +643,8 @@ export const WisphubService = {
             if (onProgress) onProgress(uniqueTicketsMap.size, totalCount);
 
             const remainingOffsets = [];
-            for (let offset = pageSize; offset < totalCount && offset < 1000; offset += pageSize) {
+            // Aumentamos el límite de seguridad a 15,000 para no truncar datos reales
+            for (let offset = pageSize; offset < totalCount && offset < 15000; offset += pageSize) {
                 remainingOffsets.push(offset);
             }
 
@@ -655,7 +678,7 @@ export const WisphubService = {
     mapTicket(t: any) {
         // Log de diagnóstico para tickets sin nombre
         if (!t.nombre_cliente && !t.cliente && !t.cliente_nombre) {
-            console.warn(`[Wisphub Diagnostic] Ticket #${t.id} sin campos de nombre estándar. Keys:`, Object.keys(t));
+            console.warn(`[Wisphub Diagnostic] Ticket #${t.id_ticket || t.id} sin campos de nombre estándar. Keys:`, Object.keys(t));
         }
 
         // --- EXTRACCIÓN DE HORA DE LLEGADA (NUEVO) ---
@@ -833,28 +856,76 @@ export const WisphubService = {
             nombre_tecnico: (() => {
                 const techIdentifier = String(t.tecnico && typeof t.tecnico === 'object' ? (t.tecnico.usuario || t.tecnico.username || t.tecnico.email || t.tecnico.nombre) : t.tecnico || t.nombre_tecnico || "").toLowerCase().trim();
                 const techIdStr = String(t.tecnico_id || (t.tecnico && typeof t.tecnico === 'object' ? (t.tecnico.id || t.tecnico.id_usuario) : "")).trim();
+                const techEmail = String(t.email_tecnico || (t.tecnico && typeof t.tecnico === 'object' ? t.tecnico.email : "")).toLowerCase().trim();
 
                 let finalName = t.nombre_tecnico || (t.tecnico && typeof t.tecnico === 'object' ? t.tecnico.nombre : null) || "Sin asignar";
 
                 if (GLOBAL_STAFF_CACHE) {
                     const found = GLOBAL_STAFF_CACHE.find(s =>
                         (s.usuario && s.usuario.toLowerCase() === techIdentifier) ||
-                        (s.email && s.email.toLowerCase() === techIdentifier) ||
+                        (s.email && (s.email.toLowerCase() === techIdentifier || s.email.toLowerCase() === techEmail)) ||
                         (String(s.id) === techIdStr && techIdStr !== "") ||
-                        (s.nombre && s.nombre.toLowerCase() === techIdentifier)
+                        (s.nombre && (s.nombre.toLowerCase() === techIdentifier || whNormalize(s.nombre) === whNormalize(techIdentifier)))
                     );
                     if (found) finalName = found.nombre;
                 }
                 return finalName;
             })(),
-            tecnico_id: t.tecnico_id || (t.tecnico && typeof t.tecnico === 'object' ? (t.tecnico.id || t.tecnico.id_usuario) : null),
-            tecnico_usuario: t.tecnico_usuario || (t.tecnico && typeof t.tecnico === 'object' ? (t.tecnico.usuario || t.tecnico.username) : null),
-            email_tecnico: t.email_tecnico || (t.tecnico && typeof t.tecnico === 'object' ? t.tecnico.email : null),
+            tecnico_id: (() => {
+                const techIdentifier = String(t.tecnico && typeof t.tecnico === 'object' ? (t.tecnico.usuario || t.tecnico.username || t.tecnico.email || t.tecnico.nombre) : t.tecnico || t.nombre_tecnico || "").toLowerCase().trim();
+                const techIdStr = String(t.tecnico_id || (t.tecnico && typeof t.tecnico === 'object' ? (t.tecnico.id || t.tecnico.id_usuario) : "")).trim();
+                const techEmail = String(t.email_tecnico || (t.tecnico && typeof t.tecnico === 'object' ? t.tecnico.email : "")).toLowerCase().trim();
+
+                if (GLOBAL_STAFF_CACHE) {
+                    const found = GLOBAL_STAFF_CACHE.find(s =>
+                        (s.usuario && s.usuario.toLowerCase() === techIdentifier) ||
+                        (s.email && (s.email.toLowerCase() === techIdentifier || s.email.toLowerCase() === techEmail)) ||
+                        (String(s.id) === techIdStr && techIdStr !== "") ||
+                        (s.nombre && (s.nombre.toLowerCase() === techIdentifier || whNormalize(s.nombre) === whNormalize(techIdentifier)))
+                    );
+                    if (found) return found.id;
+                }
+                return t.tecnico_id || (t.tecnico && typeof t.tecnico === 'object' ? (t.tecnico.id || t.tecnico.id_usuario) : null);
+            })(),
+            tecnico_usuario: (() => {
+                const techIdentifier = String(t.tecnico && typeof t.tecnico === 'object' ? (t.tecnico.usuario || t.tecnico.username || t.tecnico.email || t.tecnico.nombre) : t.tecnico || t.nombre_tecnico || "").toLowerCase().trim();
+                const techIdStr = String(t.tecnico_id || (t.tecnico && typeof t.tecnico === 'object' ? (t.tecnico.id || t.tecnico.id_usuario) : "")).trim();
+                const techEmail = String(t.email_tecnico || (t.tecnico && typeof t.tecnico === 'object' ? t.tecnico.email : "")).toLowerCase().trim();
+
+                if (GLOBAL_STAFF_CACHE) {
+                    const found = GLOBAL_STAFF_CACHE.find(s =>
+                        (s.usuario && s.usuario.toLowerCase() === techIdentifier) ||
+                        (s.email && (s.email.toLowerCase() === techIdentifier || s.email.toLowerCase() === techEmail)) ||
+                        (String(s.id) === techIdStr && techIdStr !== "") ||
+                        (s.nombre && (s.nombre.toLowerCase() === techIdentifier || whNormalize(s.nombre) === whNormalize(techIdentifier)))
+                    );
+                    if (found) return found.usuario;
+                }
+                return t.tecnico_usuario || (t.tecnico && typeof t.tecnico === 'object' ? (t.tecnico.usuario || t.tecnico.username) : null);
+            })(),
+            email_tecnico: (() => {
+                const techIdentifier = String(t.tecnico && typeof t.tecnico === 'object' ? (t.tecnico.usuario || t.tecnico.username || t.tecnico.email || t.tecnico.nombre) : t.tecnico || t.nombre_tecnico || "").toLowerCase().trim();
+                const techIdStr = String(t.tecnico_id || (t.tecnico && typeof t.tecnico === 'object' ? (t.tecnico.id || t.tecnico.id_usuario) : "")).trim();
+                const techEmail = String(t.email_tecnico || (t.tecnico && typeof t.tecnico === 'object' ? t.tecnico.email : "")).toLowerCase().trim();
+
+                if (GLOBAL_STAFF_CACHE) {
+                    const found = GLOBAL_STAFF_CACHE.find(s =>
+                        (s.usuario && s.usuario.toLowerCase() === techIdentifier) ||
+                        (s.email && (s.email.toLowerCase() === techIdentifier || s.email.toLowerCase() === techEmail)) ||
+                        (String(s.id) === techIdStr && techIdStr !== "") ||
+                        (s.nombre && (s.nombre.toLowerCase() === techIdentifier || whNormalize(s.nombre) === whNormalize(techIdentifier)))
+                    );
+                    if (found) return found.email;
+                }
+                return t.email_tecnico || (t.tecnico && typeof t.tecnico === 'object' ? t.tecnico.email : null);
+            })(),
             horas_abierto: diffHours,
             sla_status: diffHours > 48 ? 'critico' : diffHours > 24 ? 'amarillo' : 'verde',
             fecha_creacion: t.fecha_creacion || t.created_at || t.fecha,
             fecha_inicio: t.fecha_inicio || null,
             fecha_final: t.fecha_fin || t.fecha_final || t.fecha_termino || null,
+            fecha_estimada_inicio: t.fecha_estimada_inicio || null,
+            fecha_estimada_fin: t.fecha_estimada_fin || null,
             fecha_llegada: fechaLlegada,
             creado_por: (() => {
                 const creatorId = String(t.creado_por || t.created_by || "").toLowerCase().trim();
@@ -876,6 +947,7 @@ export const WisphubService = {
             barrio: extractedBarrio || 'Sin Barrio',
             telefono: serviceObj?.telefono || t.telefono || '',
             celular: serviceObj?.celular || t.celular || '',
+            ip: serviceObj?.ip || serviceObj?.ip_servicio || t.ip || t.ip_servicio || '',
             usuario_wisphub: serviceObj?.usuario ||
                 clientObj?.usuario ||
                 t.usuario ||
@@ -895,9 +967,14 @@ export const WisphubService = {
     async getTicketRaw(id: string | number): Promise<any> {
         try {
             const response = await safeFetch(`${BASE_URL}/tickets/${id}/`);
-            return response.ok ? await response.json() : null;
-        } catch (e) {
-            return null;
+            if (response.status === 404) return null;
+            if (!response.ok) {
+                throw new Error(`WispHub API Error: ${response.status}`);
+            }
+            return await response.json();
+        } catch (error) {
+            console.error(`[WispHub] Error in getTicketRaw #${id}:`, error);
+            throw error; // Re-lanzar para que el sync sepa que falló
         }
     },
 
@@ -962,47 +1039,225 @@ export const WisphubService = {
         }
     },
 
-    async addTicketComment(ticketId: string | number, comment: string, file?: File | Blob): Promise<boolean> {
+    async addTicketComment(ticketId: string | number, comment: string, file?: File | Blob, silent = false): Promise<boolean> {
         try {
-            const formData = new FormData();
-            formData.append('ticket', String(ticketId));
-            formData.append('comentario', comment);
-            if (file) formData.append('archivo', file);
-            const response = await safeFetch(`${BASE_URL}/tickets/comentarios/`, {
-                method: 'POST',
-                body: formData
-            });
-            return response.ok;
+            const hasFile = !!file;
+            const headers: Record<string, string> = hasFile ? {} : { 'Content-Type': 'application/json' };
+
+            // Estrategia de Endpoints a probar en orden
+            const endpoints = [
+                `${BASE_URL}/tickets/${ticketId}/comentarios/`, // Prioridad 1: .io Comentarios
+                `${BASE_URL}/tickets/${ticketId}/respuestas/`,  // Prioridad 2: .io Respuestas
+                `${BASE_URL}/tickets/comentarios/`,             // Fallback 1: global
+                `${BASE_URL}/tickets/respuestas/`              // Fallback 2: global
+            ];
+
+            let body;
+            if (hasFile) {
+                const formData = new FormData();
+                formData.append('ticket', String(ticketId));
+                formData.append('comentario', comment);
+                formData.append('respuesta', comment); // Backup field based on user feedback
+                if (file) formData.append('archivo', file);
+                body = formData;
+            } else {
+                body = JSON.stringify({
+                    ticket: String(ticketId),
+                    comentario: comment,
+                    respuesta: comment // Backup field based on user feedback
+                });
+            }
+
+            for (const url of endpoints) {
+                try {
+                    const response = await safeFetch(url, {
+                        method: 'POST',
+                        headers,
+                        body
+                    }, 0, silent); // 0 retries here because we are brute-forcing multiple URLs
+
+                    if (response.ok) {
+                        console.log(`[WispHub SUCCESS] Comentario enviado con éxito a: ${url}`);
+                        return true;
+                    }
+
+                    // If 404 and silent, don't try other URLs, they will likely fail too
+                    if (response.status === 404 && silent) return false;
+
+                    if (!silent) {
+                        const errText = await response.text();
+                        console.warn(`[WispHub] Falló endpoint ${url}: ${response.status} - ${errText}`);
+                    }
+                } catch (innerErr) {
+                    if (!silent) console.warn(`[WispHub] Excepción en endpoint ${url}:`, innerErr);
+                }
+            }
+
+            if (!silent) console.error('[WispHub] Todos los intentos de enviar comentario fallaron.');
+            return false;
         } catch (e) {
+            console.error('[WispHub] Add Comment Critical Exception:', e);
             return false;
         }
     },
 
     async updateTicket(ticketId: string | number, data: any, method: 'PATCH' | 'PUT' = 'PATCH'): Promise<boolean> {
+        console.log('[WisphubService.updateTicket] 🚀 Iniciando:', { ticketId, method, dataKeys: Object.keys(data) });
         try {
-            let payload = data;
-            const hasFile = data.archivo_ticket instanceof File || data.archivo_ticket instanceof Blob;
-            if (!data.asunto && !data.servicio && !hasFile) {
-                payload = {
-                    tecnico: data.tecnico,
-                    email_tecnico: data.email_tecnico,
-                    estado: data.estado,
-                    prioridad: data.prioridad,
-                    descripcion: data.descripcion ? stripHtml(data.descripcion) : undefined
-                };
-            }
+            // WispHub API seems to require multipart/form-data for ticket updates
+            // even if no file is present.
+            const fd = new FormData();
+
+            // Si data ya tiene propiedades planas, las agregamos
+            Object.keys(data).forEach(key => {
+                const value = data[key];
+                if (value !== undefined && value !== null) {
+                    if (key === 'fecha_inicio' || key === 'fecha_final') {
+                        // Ensure date format is correct if it's a Date object or ISO string
+                        // But better to trust the caller handles formatting to DD/MM/YYYY HH:mm
+                        fd.append(key, String(value));
+                        console.log(`[WisphubService.updateTicket] 📅 ${key}:`, String(value));
+                    } else if (value instanceof File || value instanceof Blob) {
+                        // Ensure the file has a valid name and extension for WispHub
+                        const allowedExts = ['docx', 'doc', 'pdf', 'png', 'jpeg', 'jpg', 'gif', 'heif', 'heic'];
+                        let fileName = 'archivo.jpg';
+                        if (value instanceof File && value.name) {
+                            const parts = value.name.split('.');
+                            let ext = parts.pop()?.toLowerCase() || 'jpg';
+                            const base = parts.join('_').replace(/\W/g, '') || 'archivo';
+
+                            // If extension is not allowed (like .webp), force .jpg
+                            if (!allowedExts.includes(ext)) {
+                                ext = 'jpg';
+                            }
+                            fileName = `${base}.${ext}`;
+                        }
+                        fd.append(key, value, fileName);
+                        console.log(`[WisphubService.updateTicket] 📎 ${key}:`, fileName);
+                    } else {
+                        fd.append(key, String(value));
+                        if (key !== 'descripcion') { // Evitar loggear descripciones largas
+                            console.log(`[WisphubService.updateTicket] 📝 ${key}:`, String(value));
+                        }
+                    }
+                }
+            });
+
+            // Si se pasó un objeto plano y no FormData, lo convertimos.
+            // La lógica anterior de "payload = data" fallaba si enviábamos JSON.
+
+            console.log('[WisphubService.updateTicket] 🌐 Enviando request a:', `${BASE_URL}/tickets/${ticketId}/`);
             const response = await safeFetch(`${BASE_URL}/tickets/${ticketId}/`, {
                 method: method,
-                headers: hasFile ? {} : { 'Content-Type': 'application/json' },
-                body: hasFile ? (() => {
-                    const fd = new FormData();
-                    Object.keys(payload).forEach(k => fd.append(k, payload[k]));
-                    return fd;
-                })() : JSON.stringify(payload)
+                headers: {}, // Let browser set Content-Type with boundary for FormData
+                body: fd
             });
+            console.log('[WisphubService.updateTicket] 📡 Response status:', response.status, response.ok ? '✅' : '❌');
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error('[WisphubService.updateTicket] ⚠️ Error body:', errorText);
+            }
+
             return response.ok;
         } catch (e) {
+            console.error('[WisphubService.updateTicket] 💥 Exception:', e);
             return false;
+        }
+    },
+
+
+
+    async setTicketStartTime(ticketId: string | number): Promise<boolean> {
+        // Formato esperado por WispHub: YYYY-MM-DD HH:MM:SS (Hora Colombia)
+        const d = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Bogota' }));
+        const pad = (n: number) => n.toString().padStart(2, '0');
+        const formattedDate = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+        const timestamp = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+
+        try {
+            // 1. Obtener ticket actual para no perder descripción
+            const rawTicket = await this.getTicketRaw(ticketId);
+            const currentDesc = stripHtml(rawTicket?.descripcion || ".");
+
+            const { data: { user } } = await safeGetUser();
+            const techName = user?.user_metadata?.full_name || 'Técnico';
+
+            const startMessage = `==== INICIO DE TRABAJO | ${techName.toUpperCase()} a las ${timestamp} ====`;
+            const updatedDesc = `${currentDesc}\n\n${startMessage}`.trim();
+
+            // 2. Marcar fecha_inicio y actualizar descripción en WispHub
+            const ok = await this.updateTicket(ticketId, {
+                fecha_inicio: formattedDate,
+                descripcion: updatedDesc
+            });
+
+            return ok;
+        } catch (error) {
+            console.error('[WispHub] Error en setTicketStartTime:', error);
+            return false;
+        }
+    },
+
+    async sendArrivalComment(ticketId: string | number): Promise<boolean> {
+        const now = new Date();
+        const timestamp = now.toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        let supabaseOk = false;
+        let updateOk = false;
+
+        console.log(`[WispHub] Registrando llegada para ticket ${ticketId}...`);
+
+        // 1. Guardar en Supabase (Audit Log)
+        try {
+            const { data: { user } } = await safeGetUser();
+
+            await supabase.from('ticket_events').insert({
+                ticket_id: String(ticketId),
+                event_type: 'arrival',
+                technician_id: user?.id,
+                created_at: now.toISOString(),
+                metadata: { timestamp_display: timestamp }
+            });
+            supabaseOk = true;
+        } catch (e) {
+            console.error('[WispHub] Error en Supabase (arrival):', e);
+        }
+
+        // 2. Actualizar DESCRIPCIÓN en WispHub (Substitución de burbuja)
+        try {
+            const rawTicket = await this.getTicketRaw(ticketId);
+            const currentDesc = stripHtml(rawTicket?.descripcion || ".");
+
+            const bubbleMessage = `==== LLEGADA AL DESTINO | Ticket ${ticketId} a las ${timestamp} ====`;
+            const updatedDesc = `${currentDesc}\n\n${bubbleMessage}`.trim();
+
+            updateOk = await this.updateTicket(ticketId, { descripcion: updatedDesc });
+            if (updateOk) console.log(`[WispHub] ✅ Descripción actualizada con mensaje de llegada.`);
+        } catch (e) {
+            console.error('[WispHub] Error en actualización de llegada:', e);
+        }
+
+        return supabaseOk || updateOk;
+    },
+
+    /**
+     * Obtiene los eventos de llegada registrados en Supabase para un ticket.
+     */
+    async getArrivalEvents(ticketId: string | number): Promise<any[]> {
+        try {
+            const { supabase } = await import('./supabase');
+            const { data, error } = await supabase
+                .from('ticket_events')
+                .select('*')
+                .eq('ticket_id', String(ticketId))
+                .eq('event_type', 'arrival')
+                .order('created_at', { ascending: false });
+
+            if (error) throw error;
+            return data || [];
+        } catch (error) {
+            console.error('[Supabase] Error al obtener eventos de llegada:', error);
+            return [];
         }
     },
 
@@ -1010,7 +1265,7 @@ export const WisphubService = {
         try {
             const client = await this.getServiceDetail(serviceId);
             const currentComments = client?.comentarios || '';
-            const timestamp = new Date().toLocaleString('es-CO', { hour12: false });
+            const timestamp = new Date().toLocaleString('es-CO', { hour12: false, timeZone: 'America/Bogota' });
             const updatedComments = `${currentComments}\n[${timestamp}]: ${newComment}`.trim();
             return this.updateClient(serviceId, { comentarios: updatedComments });
         } catch (error) {
@@ -1177,11 +1432,14 @@ export const WisphubService = {
             }
 
             const response = await safeFetch(url);
-            if (!response.ok) return { results: [], count: 0 };
+            if (!response.ok) {
+                throw new Error(`WispHub API Error: ${response.status}`);
+            }
             const data = await response.json();
             return { results: (data.results || []).map((t: any) => this.mapTicket(t)), count: data.count || 0 };
         } catch (error) {
-            return { results: [], count: 0 };
+            console.error('[WispHub] Error in getAllTicketsPage:', error);
+            throw error;
         }
     },
 
@@ -1215,14 +1473,14 @@ export const WisphubService = {
         }
     },
 
-    async uploadClientEvidence(clientId: string | number, file: Blob, description: string): Promise<boolean> {
+    async uploadClientEvidence(clientId: string | number, file: Blob, descripcion: string): Promise<boolean> {
         try {
             const formData = new FormData();
             formData.append('id_servicio', String(clientId));
-            formData.append('archivo', file, `${description.replace(/\s+/g, '_')}.jpg`);
-            formData.append('descripcion', description);
+            formData.append('archivo', file, `${descripcion.replace(/\s+/g, '_')}.jpg`);
+            formData.append('descripcion', descripcion);
 
-            console.log(`[WispHub] Uploading evidence: ${description} for client ${clientId}`);
+            console.log(`[WispHub] Uploading evidence: ${descripcion} for client ${clientId}`);
 
             // INTENTO 1: Endpoint de adjuntos/archivos (Probaremos rutas estándar)
             // Ruta A: /clientes/archivos/ (General)

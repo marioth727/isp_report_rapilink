@@ -13,13 +13,17 @@ import {
     ChevronRight,
     X,
     Check,
-    LayoutGrid
+    LayoutGrid,
+    Edit,
+    AlertTriangle
 } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import { Modal } from '../components/ui/Modal';
 import { supabase } from '../lib/supabase';
 import clsx from 'clsx';
 
 export default function InventoryAssignment() {
+    const navigate = useNavigate();
     const [assets, setAssets] = useState<any[]>([]);
     const [technicians, setTechnicians] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
@@ -28,6 +32,7 @@ export default function InventoryAssignment() {
     const [serialSearchQuery, setSerialSearchQuery] = useState('');
     const [kits, setKits] = useState<any[]>([]);
     const [selectedAssets, setSelectedAssets] = useState<string[]>([]);
+    const [selectedQuantities, setSelectedQuantities] = useState<Record<string, number>>({});
     const [selectedTech, setSelectedTech] = useState<string>('');
     const [showSerialPicker, setShowSerialPicker] = useState<string | null>(null);
     const [showKitPicker, setShowKitPicker] = useState(false);
@@ -42,7 +47,7 @@ export default function InventoryAssignment() {
         try {
             const { data: assetData } = await supabase
                 .from('inventory_assets')
-                .select('*, inventory_items(name, model_name, brand, image_url)')
+                .select('*, inventory_items(name, model_name, brand, image_url, is_serialized)')
                 .eq('status', 'warehouse');
             if (assetData) setAssets(assetData);
 
@@ -65,11 +70,17 @@ export default function InventoryAssignment() {
     };
 
     const toggleAsset = (assetId: string) => {
-        setSelectedAssets(prev =>
-            prev.includes(assetId)
-                ? prev.filter(id => id !== assetId)
-                : [...prev, assetId]
-        );
+        setSelectedAssets(prev => {
+            const isSelected = prev.includes(assetId);
+            if (isSelected) {
+                // Remove from selected quantities if deselected
+                const newQuantities = { ...selectedQuantities };
+                delete newQuantities[assetId];
+                setSelectedQuantities(newQuantities);
+                return prev.filter(id => id !== assetId);
+            }
+            return [...prev, assetId];
+        });
     };
 
     const handleAssign = async () => {
@@ -78,39 +89,127 @@ export default function InventoryAssignment() {
         const toastEvent = (msg: string, type: any) => window.dispatchEvent(new CustomEvent('app:toast', { detail: { message: msg, type } }));
 
         try {
-            // Register movement for EACH asset to ensure individual trackability
-            const movementsToInsert = selectedAssets.map(assetId => ({
-                asset_id: assetId,
-                movement_type: 'transfer',
-                destination_holder_id: selectedTech,
-                notes: `Asignación masiva (parte de un lote de ${selectedAssets.length})`
-            }));
+            for (const assetId of selectedAssets) {
+                // Find group for this asset
+                const group = Object.values(groupedAssets).find((g: any) => g.assets.some((a: any) => a.id === assetId)) as any;
+                if (!group) continue;
 
-            const { data: moveData, error: moveError } = await supabase
-                .from('inventory_movements')
-                .insert(movementsToInsert)
-                .select();
+                if (!group.item.is_serialized) {
+                    // --- BULK ASSIGNMENT LOGIC (SINGLE-ROW POLICY) ---
+                    const totalToAssign = selectedQuantities[group.itemId] || 0;
+                    if (totalToAssign <= 0) continue;
 
-            if (moveError) throw moveError;
+                    // 1. Find if the TECHNICIAN already has an asset for this item
+                    const { data: existingTechAssets } = await supabase
+                        .from('inventory_assets')
+                        .select('*')
+                        .eq('item_id', group.itemId)
+                        .eq('current_holder_id', selectedTech)
+                        .eq('status', 'assigned')
+                        .limit(1);
 
-            // Update each asset with its corresponding movement_id
-            // Since movements were inserted together, we map them back
-            const updatePromises = selectedAssets.map(assetId => {
-                const move = (moveData as any[]).find(m => m.asset_id === assetId);
-                return supabase
-                    .from('inventory_assets')
-                    .update({
-                        status: 'assigned',
-                        current_holder_id: selectedTech,
-                        last_movement_id: move?.id
-                    })
-                    .eq('id', assetId);
-            });
+                    const existingTechAsset = existingTechAssets?.[0];
 
-            await Promise.all(updatePromises);
+                    // 2. Consume from WAREHOUSE rows one by one
+                    let remainingToAssign = totalToAssign;
+                    const warehouseAssets = group.assets.sort((a: any, b: any) => (a.quantity || 0) - (b.quantity || 0)); // FIFO or smaller lots first
 
-            toastEvent(`${selectedAssets.length} equipos asignados correctamente`, 'success');
+                    for (const whAsset of warehouseAssets) {
+                        if (remainingToAssign <= 0) break;
+
+                        const canTake = Math.min(whAsset.quantity || 0, remainingToAssign);
+                        if (canTake <= 0) continue;
+
+                        // Decrement warehouse asset
+                        const { error: updateError } = await supabase
+                            .from('inventory_assets')
+                            .update({ quantity: (whAsset.quantity || 0) - canTake })
+                            .eq('id', whAsset.id);
+
+                        if (updateError) throw updateError;
+                        remainingToAssign -= canTake;
+                    }
+
+                    // 3. Update or Create for Technician
+                    if (existingTechAsset) {
+                        const { error: techUpdateError } = await supabase
+                            .from('inventory_assets')
+                            .update({ quantity: (existingTechAsset.quantity || 0) + totalToAssign })
+                            .eq('id', existingTechAsset.id);
+
+                        if (techUpdateError) throw techUpdateError;
+
+                        // Log movement
+                        await supabase.from('inventory_movements').insert({
+                            asset_id: existingTechAsset.id,
+                            movement_type: 'transfer',
+                            destination_holder_id: selectedTech,
+                            quantity: totalToAssign,
+                            notes: `Asignación consolidada (Material al granel) - Fila Única`,
+                            created_by: (await supabase.auth.getUser()).data.user?.id
+                        });
+                    } else {
+                        const lotSerial = `LOTE-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+                        const { data: newAsset, error: techInsertError } = await supabase
+                            .from('inventory_assets')
+                            .insert({
+                                item_id: group.itemId,
+                                serial_number: lotSerial,
+                                status: 'assigned',
+                                current_holder_id: selectedTech,
+                                quantity: totalToAssign,
+                                current_location: 'CAMPO'
+                            })
+                            .select()
+                            .single();
+
+                        if (techInsertError) throw techInsertError;
+
+                        // Log movement
+                        await supabase.from('inventory_movements').insert({
+                            asset_id: newAsset.id,
+                            movement_type: 'transfer',
+                            destination_holder_id: selectedTech,
+                            quantity: totalToAssign,
+                            notes: `Asignación inicial (Material al granel) - Fila Única`,
+                            created_by: (await supabase.auth.getUser()).data.user?.id
+                        });
+                    }
+                } else {
+                    // --- SERIALIZED ASSIGNMENT (Standard logic) ---
+                    const asset = group.assets.find((a: any) => a.id === assetId);
+                    if (!asset) continue;
+
+                    const { data: moveData, error: moveError } = await supabase
+                        .from('inventory_movements')
+                        .insert({
+                            asset_id: asset.id,
+                            movement_type: 'transfer',
+                            destination_holder_id: selectedTech,
+                            quantity: 1,
+                            notes: `Asignación estándar`,
+                            created_by: (await supabase.auth.getUser()).data.user?.id
+                        })
+                        .select()
+                        .single();
+
+                    if (moveError) throw moveError;
+
+                    await supabase
+                        .from('inventory_assets')
+                        .update({
+                            status: 'assigned',
+                            current_holder_id: selectedTech,
+                            last_movement_id: moveData.id,
+                            current_location: 'CAMPO'
+                        })
+                        .eq('id', asset.id);
+                }
+            }
+
+            toastEvent(`${selectedAssets.length} ítems procesados correctamente`, 'success');
             setSelectedAssets([]);
+            setSelectedQuantities({});
             setSelectedTech('');
             loadData();
         } catch (error: any) {
@@ -124,8 +223,41 @@ export default function InventoryAssignment() {
     const applyKit = (kit: any) => {
         setActiveKit(kit);
         setShowKitPicker(false);
-        // We don't auto-select serials because we don't know WHICH ones.
-        // But we could filter the view to show only what the kit needs.
+
+        const newQuantities = { ...selectedQuantities };
+        const newSelectedAssets = [...selectedAssets];
+
+        kit.inventory_kit_items.forEach((kitItem: any) => {
+            const group = groupedAssets[kitItem.item_id];
+            if (!group) return;
+
+            const totalInWH = group.assets.reduce((acc: number, a: any) => acc + (a.quantity || 1), 0);
+
+            if (!group.item.is_serialized) {
+                // Auto-fill quantity for bulk items (limit by stock)
+                const qtyToApply = Math.min(kitItem.quantity || 0, totalInWH);
+                if (qtyToApply > 0) {
+                    newQuantities[kitItem.item_id] = qtyToApply;
+                    // Ensure the primary asset is in selectedAssets to show the badge
+                    if (!newSelectedAssets.includes(group.assets[0].id)) {
+                        newSelectedAssets.push(group.assets[0].id);
+                    }
+                }
+            } else {
+                // For serialized, we can't auto-pick a serial, 
+                // but we let the activeKit filter show it.
+            }
+        });
+
+        setSelectedQuantities(newQuantities);
+        setSelectedAssets(newSelectedAssets);
+
+        window.dispatchEvent(new CustomEvent('app:toast', {
+            detail: {
+                message: `Kit "${kit.name}" aplicado. Verifica las cantidades.`,
+                type: 'info'
+            }
+        }));
     };
 
     const groupedAssets = assets.reduce((acc: any, asset: any) => {
@@ -195,11 +327,16 @@ export default function InventoryAssignment() {
                             </button>
                             {activeKit && (
                                 <button
-                                    onClick={() => setActiveKit(null)}
-                                    className="p-2 hover:bg-muted rounded-xl text-muted-foreground"
-                                    title="Quitar filtro de Kit"
+                                    onClick={() => {
+                                        setActiveKit(null);
+                                        setSelectedQuantities({});
+                                        setSelectedAssets([]);
+                                    }}
+                                    className="p-2 hover:bg-muted rounded-xl text-muted-foreground flex items-center gap-2 border border-border"
+                                    title="Quitar filtro de Kit y limpiar selección"
                                 >
                                     <X size={14} />
+                                    <span className="text-[10px] font-black uppercase">Limpiar</span>
                                 </button>
                             )}
                         </div>
@@ -271,6 +408,9 @@ export default function InventoryAssignment() {
                 ) : filteredGroups.length > 0 ? (
                     filteredGroups.map((group: any) => {
                         const selectedInGroup = group.assets.filter((a: any) => selectedAssets.includes(a.id)).length;
+                        const kitRequirement = activeKit?.inventory_kit_items.find((ki: any) => ki.item_id === group.itemId)?.quantity || 0;
+                        const totalWH = group.assets.reduce((acc: number, a: any) => acc + (a.quantity || 1), 0);
+                        const isStockLow = kitRequirement > totalWH;
 
                         return (
                             <div
@@ -283,14 +423,43 @@ export default function InventoryAssignment() {
                                     "relative overflow-hidden bg-card border-2 p-6 rounded-[2.5rem] cursor-pointer transition-all hover:scale-[1.02] active:scale-[0.98] group",
                                     selectedInGroup > 0
                                         ? "border-primary bg-primary/[0.02] shadow-2xl shadow-primary/10"
-                                        : "border-border hover:border-primary/20 hover:shadow-xl hover:shadow-muted/30"
+                                        : isStockLow
+                                            ? "border-red-500/50 bg-red-500/[0.02]"
+                                            : "border-border hover:border-primary/20 hover:shadow-xl hover:shadow-muted/30"
                                 )}
                             >
                                 {selectedInGroup > 0 && (
-                                    <div className="absolute top-6 right-6 z-10">
+                                    <div className="absolute top-6 right-6 z-10 flex items-center gap-2">
                                         <div className="bg-primary px-3 py-1 rounded-full shadow-lg shadow-primary/30 flex items-center gap-2">
                                             <CheckCircle className="w-4 h-4 text-white" />
-                                            <span className="text-[10px] font-black text-white">{selectedInGroup} Seleccionados</span>
+                                            <span className="text-[10px] font-black text-white">
+                                                {group.item.is_serialized ? `${selectedInGroup} Seleccionados` : `${selectedQuantities[group.itemId]} Unidades`}
+                                            </span>
+                                        </div>
+                                        <button
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                const groupAssetIds = group.assets.map((a: any) => a.id);
+                                                setSelectedAssets(prev => prev.filter(id => !groupAssetIds.includes(id)));
+                                                setSelectedQuantities(prev => {
+                                                    const next = { ...prev };
+                                                    delete next[group.itemId];
+                                                    return next;
+                                                });
+                                            }}
+                                            className="w-8 h-8 bg-background border border-border rounded-full flex items-center justify-center text-muted-foreground hover:text-red-500 hover:border-red-500 transition-all shadow-sm"
+                                            title="Limpiar selección"
+                                        >
+                                            <X size={14} />
+                                        </button>
+                                    </div>
+                                )}
+
+                                {isStockLow && selectedInGroup === 0 && (
+                                    <div className="absolute top-6 right-6 z-10">
+                                        <div className="bg-red-500 px-3 py-1 rounded-full shadow-lg shadow-red-500/30 flex items-center gap-2">
+                                            <AlertTriangle className="w-4 h-4 text-white" />
+                                            <span className="text-[10px] font-black text-white">STOCK INSUFICIENTE</span>
                                         </div>
                                     </div>
                                 )}
@@ -317,7 +486,7 @@ export default function InventoryAssignment() {
                                     <div className="pt-4 border-t border-border flex justify-between items-center">
                                         <div className="space-y-1">
                                             <p className="text-[10px] font-black text-muted-foreground uppercase tracking-widest">En Bodega</p>
-                                            <p className="text-xl font-black text-foreground">{group.assets.length} <span className="text-[10px] text-muted-foreground font-bold">UNIDADES</span></p>
+                                            <p className="text-xl font-black text-foreground">{group.assets.reduce((acc: number, curr: any) => acc + (curr.quantity || 1), 0)} <span className="text-[10px] text-muted-foreground font-bold">UNIDADES</span></p>
                                         </div>
                                         <div className="w-10 h-10 rounded-2xl bg-primary/10 flex items-center justify-center text-primary group-hover:bg-primary group-hover:text-white transition-all">
                                             <ChevronRight size={20} />
@@ -363,7 +532,11 @@ export default function InventoryAssignment() {
                                     </div>
                                     <div>
                                         <h3 className="text-xl font-black uppercase tracking-tight text-foreground">{group.item?.name}</h3>
-                                        <p className="text-xs font-bold text-muted-foreground uppercase tracking-widest">Seleccionar Seriales Disponibles ({group.assets.length})</p>
+                                        <p className="text-xs font-bold text-muted-foreground uppercase tracking-widest">
+                                            {group.item?.is_serialized
+                                                ? `Seleccionar Seriales Disponibles (${group.assets.length})`
+                                                : "Material al Granel - Selección por Cantidad"}
+                                        </p>
                                     </div>
                                 </div>
                                 <button
@@ -374,71 +547,147 @@ export default function InventoryAssignment() {
                                 </button>
                             </div>
 
-                            {/* Search Filter for Serials */}
-                            <div className="px-8 pb-4">
-                                <div className="relative group">
-                                    <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground group-focus-within:text-primary transition-colors" />
-                                    <input
-                                        type="text"
-                                        placeholder="Buscar serial específico..."
-                                        value={serialSearchQuery}
-                                        onChange={(e) => setSerialSearchQuery(e.target.value)}
-                                        className="w-full bg-muted/50 border-2 border-border rounded-2xl py-3 pl-11 pr-4 text-sm font-bold outline-none focus:border-primary transition-all"
-                                    />
-                                    {serialSearchQuery && (
-                                        <button
-                                            onClick={() => setSerialSearchQuery('')}
-                                            className="absolute right-4 top-1/2 -translate-y-1/2 p-1 hover:bg-muted rounded-lg transition-colors"
-                                        >
-                                            <X size={14} className="text-muted-foreground" />
-                                        </button>
-                                    )}
-                                </div>
-                            </div>
-
-                            {/* Serial List */}
+                            {/* Serial/Lot List */}
                             <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
                                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                                    {group.assets
-                                        .filter((a: any) => a.serial_number.toLowerCase().includes(serialSearchQuery.toLowerCase()))
-                                        .map((asset: any) => {
-                                            const isSelected = selectedAssets.includes(asset.id);
-                                            return (
-                                                <div
-                                                    key={asset.id}
-                                                    onClick={() => toggleAsset(asset.id)}
-                                                    className={clsx(
-                                                        "p-4 rounded-2xl border-2 flex items-center justify-between cursor-pointer transition-all",
-                                                        isSelected
-                                                            ? "border-primary bg-primary/5"
-                                                            : "border-border hover:border-primary/30 bg-muted/10"
-                                                    )}
-                                                >
-                                                    <div className="flex items-center gap-3">
-                                                        <Hash size={14} className={isSelected ? "text-primary" : "text-muted-foreground"} />
-                                                        <span className={clsx(
-                                                            "text-xs font-black uppercase tracking-wider",
-                                                            isSelected ? "text-primary" : "text-foreground"
-                                                        )}>
-                                                            {asset.serial_number}
-                                                        </span>
-                                                    </div>
-                                                    <div className={clsx(
-                                                        "w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all",
-                                                        isSelected ? "bg-primary border-primary" : "bg-card border-border"
-                                                    )}>
-                                                        {isSelected && <Check size={14} className="text-white" />}
+                                    {!group.item.is_serialized ? (
+                                        // SINGLE CARD FOR BULK
+                                        <div className="flex flex-col gap-2 col-span-full">
+                                            <div
+                                                className={clsx(
+                                                    "p-6 rounded-3xl border-2 flex flex-col gap-4 transition-all bg-card shadow-sm",
+                                                    group.assets.some((a: any) => selectedAssets.includes(a.id))
+                                                        ? "border-primary bg-primary/[0.02]"
+                                                        : "border-border"
+                                                )}
+                                            >
+                                                <div className="flex items-center justify-between">
+                                                    <div className="flex items-center gap-4">
+                                                        <div className="w-12 h-12 rounded-2xl bg-primary/10 flex items-center justify-center text-primary">
+                                                            <Package size={24} />
+                                                        </div>
+                                                        <div className="flex flex-col">
+                                                            <span className="text-sm font-black uppercase tracking-wider text-foreground">
+                                                                DISPONIBLE EN BODEGA
+                                                            </span>
+                                                            <span className="text-xs font-bold text-muted-foreground uppercase">
+                                                                {group.assets.reduce((acc: number, curr: any) => acc + (curr.quantity || 0), 0)} UNIDADES TOTALES
+                                                            </span>
+                                                        </div>
                                                     </div>
                                                 </div>
-                                            );
-                                        })}
+
+                                                <div className="pt-4 border-t border-dashed border-border">
+                                                    <div className="flex flex-col gap-2">
+                                                        <span className="text-[10px] font-black uppercase text-muted-foreground">
+                                                            CANTIDAD A ENTREGAR:
+                                                        </span>
+                                                        <div className="flex items-center gap-3">
+                                                            <input
+                                                                type="number"
+                                                                min="0"
+                                                                max={group.assets.reduce((acc: number, curr: any) => acc + (curr.quantity || 0), 0)}
+                                                                placeholder="0"
+                                                                value={selectedQuantities[group.itemId] || ''}
+                                                                onChange={(e) => {
+                                                                    const totalAvailable = group.assets.reduce((acc: number, curr: any) => acc + (curr.quantity || 0), 0);
+                                                                    const val = e.target.value === '' ? 0 : parseInt(e.target.value);
+                                                                    const qty = Math.max(0, Math.min(val, totalAvailable));
+
+                                                                    setSelectedQuantities(prev => ({
+                                                                        ...prev,
+                                                                        [group.itemId]: qty
+                                                                    }));
+
+                                                                    // Update selectedAssets based on quantity
+                                                                    if (qty > 0) {
+                                                                        // Mark ALL underlying assets as selected if they contribute?
+                                                                        // Actually, we just need to know we want 'qty' from this itemId.
+                                                                        // We'll handle the actual DB rows in handleAssign.
+                                                                        // To trigger the "X Selected" in the list, let's mark the first asset as selected
+                                                                        if (!selectedAssets.includes(group.assets[0].id)) {
+                                                                            setSelectedAssets(prev => [...prev, group.assets[0].id]);
+                                                                        }
+                                                                    } else {
+                                                                        // Unselect all assets for this group
+                                                                        const groupAssetIds = group.assets.map((a: any) => a.id);
+                                                                        setSelectedAssets(prev => prev.filter(id => !groupAssetIds.includes(id)));
+                                                                    }
+                                                                }}
+                                                                className="flex-1 bg-muted/50 border-2 border-border px-4 py-3 text-lg font-black text-center outline-none focus:border-primary transition-all rounded-2xl"
+                                                            />
+                                                            <button
+                                                                onClick={() => {
+                                                                    const total = group.assets.reduce((acc: number, curr: any) => acc + (curr.quantity || 0), 0);
+                                                                    setSelectedQuantities(prev => ({ ...prev, [group.itemId]: total }));
+                                                                    if (!selectedAssets.includes(group.assets[0].id)) {
+                                                                        setSelectedAssets(prev => [...prev, group.assets[0].id]);
+                                                                    }
+                                                                }}
+                                                                className="px-4 py-3 bg-primary/10 text-primary text-[10px] font-black uppercase rounded-2xl hover:bg-primary/20"
+                                                            >
+                                                                Máximo
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        // SERIALIZED LIST (Same as before but filtered)
+                                        group.assets
+                                            .filter((a: any) => a.serial_number.toLowerCase().includes(serialSearchQuery.toLowerCase()))
+                                            .map((asset: any) => {
+                                                const isSelected = selectedAssets.includes(asset.id);
+                                                return (
+                                                    <div key={asset.id} className="flex flex-col gap-2">
+                                                        <div
+                                                            onClick={() => toggleAsset(asset.id)}
+                                                            className={clsx(
+                                                                "p-4 rounded-2xl border-2 flex flex-col gap-3 cursor-pointer transition-all",
+                                                                isSelected
+                                                                    ? "border-primary bg-primary/5"
+                                                                    : "border-border hover:border-primary/30 bg-muted/10"
+                                                            )}
+                                                        >
+                                                            <div className="flex items-center justify-between">
+                                                                <div className="flex items-center gap-3">
+                                                                    <div className={clsx(
+                                                                        "w-8 h-8 rounded-full flex items-center justify-center transition-all",
+                                                                        isSelected ? "bg-primary text-white" : "bg-muted text-muted-foreground"
+                                                                    )}>
+                                                                        <Hash size={16} />
+                                                                    </div>
+                                                                    <div className="flex flex-col">
+                                                                        <span className={clsx(
+                                                                            "text-xs font-black uppercase tracking-wider",
+                                                                            isSelected ? "text-primary" : "text-foreground"
+                                                                        )}>
+                                                                            {asset.serial_number}
+                                                                        </span>
+                                                                    </div>
+                                                                </div>
+                                                                <div className={clsx(
+                                                                    "w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all",
+                                                                    isSelected ? "bg-primary border-primary" : "bg-card border-border"
+                                                                )}>
+                                                                    {isSelected && <Check size={14} className="text-white" />}
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })
+                                    )}
                                 </div>
                             </div>
 
                             {/* Modal Footer */}
                             <div className="p-6 bg-muted/10 border-t border-border flex justify-between items-center">
                                 <div className="text-xs font-bold text-muted-foreground uppercase tracking-widest">
-                                    {group.assets.filter((a: any) => selectedAssets.includes(a.id)).length} de {group.assets.length} seleccionados
+                                    {group.item?.is_serialized
+                                        ? `${group.assets.filter((a: any) => selectedAssets.includes(a.id)).length} de ${group.assets.length} seleccionados`
+                                        : (selectedQuantities[group.itemId] > 0 ? "Cantidad Definida" : "Sin Seleccionar")}
                                 </div>
                                 <div className="flex gap-3">
                                     <button
@@ -507,7 +756,14 @@ export default function InventoryAssignment() {
                             </button>
                         ))}
                     </div>
-                    <div className="pt-4 border-t border-border flex justify-end">
+                    <div className="pt-4 border-t border-border flex justify-between items-center">
+                        <button
+                            onClick={() => navigate('/operaciones/inventario/kits')}
+                            className="px-4 py-2 text-[10px] font-black uppercase text-primary hover:bg-primary/5 rounded-xl transition-colors flex items-center gap-2"
+                        >
+                            <Edit size={12} />
+                            Gestionar Plantillas
+                        </button>
                         <button
                             onClick={() => setShowKitPicker(false)}
                             className="px-6 py-3 bg-muted rounded-xl text-[10px] font-black uppercase"
@@ -519,24 +775,26 @@ export default function InventoryAssignment() {
             </Modal>
 
             {/* Selection Toolbar (Floating) */}
-            {selectedAssets.length > 0 && (
-                <div className="fixed bottom-8 left-1/2 -translate-x-1/2 z-[60] flex items-center gap-6 px-8 py-4 bg-foreground text-background rounded-full shadow-2xl animate-in slide-in-from-bottom-10 border border-white/10">
-                    <div className="flex items-center gap-3 pr-6 border-r border-white/20">
-                        <div className="w-8 h-8 rounded-full bg-primary flex items-center justify-center font-black text-white text-xs">
-                            {selectedAssets.length}
+            {
+                selectedAssets.length > 0 && (
+                    <div className="fixed bottom-8 left-1/2 -translate-x-1/2 z-[60] flex items-center gap-6 px-8 py-4 bg-foreground text-background rounded-full shadow-2xl animate-in slide-in-from-bottom-10 border border-white/10">
+                        <div className="flex items-center gap-3 pr-6 border-r border-white/20">
+                            <div className="w-8 h-8 rounded-full bg-primary flex items-center justify-center font-black text-white text-xs">
+                                {selectedAssets.length}
+                            </div>
+                            <span className="text-xs font-black uppercase tracking-widest">Equipos para entrega</span>
                         </div>
-                        <span className="text-xs font-black uppercase tracking-widest">Equipos para entrega</span>
+                        <button
+                            onClick={handleAssign}
+                            disabled={!selectedTech || isSaving}
+                            className="flex items-center gap-3 text-xs font-black uppercase hover:text-primary transition-colors disabled:opacity-30"
+                        >
+                            {isSaving ? <Loader2 size={16} className="animate-spin" /> : <ArrowRight size={16} />}
+                            {selectedTech ? `Entregar a ${technicians.find(t => t.id === selectedTech)?.full_name.split(' ')[0]}` : 'Seleccione técnico arriba'}
+                        </button>
                     </div>
-                    <button
-                        onClick={handleAssign}
-                        disabled={!selectedTech || isSaving}
-                        className="flex items-center gap-3 text-xs font-black uppercase hover:text-primary transition-colors disabled:opacity-30"
-                    >
-                        {isSaving ? <Loader2 size={16} className="animate-spin" /> : <ArrowRight size={16} />}
-                        {selectedTech ? `Entregar a ${technicians.find(t => t.id === selectedTech)?.full_name.split(' ')[0]}` : 'Seleccione técnico arriba'}
-                    </button>
-                </div>
-            )}
-        </div>
+                )
+            }
+        </div >
     );
 }

@@ -53,6 +53,7 @@ export default function InventoryCatalog() {
         unit_cost: 0,
         currency: 'COP',
         warranty_days: 365,
+        is_serialized: true,
     };
 
     const [itemFormData, setItemFormData] = useState(initialFormData);
@@ -213,6 +214,7 @@ export default function InventoryCatalog() {
                 unit_cost: (item as any).unit_cost || 0,
                 currency: (item as any).currency || 'COP',
                 warranty_days: (item as any).warranty_days || 365,
+                is_serialized: (item as any).is_serialized ?? true,
             });
             setPreviewImage((item as any).image_url || null);
         } else {
@@ -393,6 +395,26 @@ export default function InventoryCatalog() {
                                         <label className="text-[10px] font-black uppercase text-muted-foreground ml-1 text-primary">Nivel Mínimo Stock</label>
                                         <input type="number" name="min_stock_level" value={itemFormData.min_stock_level} onChange={handleInputChange} className="w-full bg-primary/5 border-2 border-primary/20 rounded-xl p-3 text-sm font-black focus:border-primary outline-none" />
                                     </div>
+                                </div>
+
+                                <div className="p-4 bg-primary/5 border-2 border-primary/10 rounded-2xl flex items-center justify-between">
+                                    <div className="space-y-0.5">
+                                        <p className="text-[11px] font-black uppercase text-foreground">Control por Serial (SN)</p>
+                                        <p className="text-[9px] font-bold text-muted-foreground uppercase leading-tight">Desactiva para cables, conectores o herrajes.</p>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={() => setItemFormData(prev => ({ ...prev, is_serialized: !prev.is_serialized }))}
+                                        className={clsx(
+                                            "w-12 h-6 rounded-full transition-all relative",
+                                            itemFormData.is_serialized ? "bg-primary" : "bg-muted"
+                                        )}
+                                    >
+                                        <div className={clsx(
+                                            "absolute top-1 w-4 h-4 bg-white rounded-full transition-all",
+                                            itemFormData.is_serialized ? "right-1" : "left-1"
+                                        )} />
+                                    </button>
                                 </div>
                             </div>
                         )}
