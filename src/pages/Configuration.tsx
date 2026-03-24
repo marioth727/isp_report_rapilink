@@ -297,7 +297,7 @@ Esta acción es IRREVERSIBLE y eliminará tanto su perfil como su cuenta de acce
         try {
             const { data: { user: currentUser } } = await supabase.auth.getUser();
 
-            // 0. Sincronización Total (Auth + Profile) via RPC MÁSTER V5 (ROBUST JSONB)
+            // 0. Sincronización Total (Auth + Profile) via RPC MÁSTER V5 (PARCHEADO CON PERMISOS)
             // Empaquetamos todo en un solo objeto 'payload' para evitar errores de firma en PostgREST
             const payloadData = {
                 target_user_id: userId,
@@ -308,11 +308,13 @@ Esta acción es IRREVERSIBLE y eliminará tanto su perfil como su cuenta de acce
                 new_wisphub_id: editingWispHubId,
                 new_operational_level: editingOperationalLevel,
                 new_is_field_tech: editingIsFieldTech,
-                new_allowed_menus: editingAllowedMenus
+                new_allowed_menus: editingAllowedMenus,
+                new_permissions: editingPermissions, // SOPORTADO POR V5 PARCHEADO
+                new_notification_email: editingNotificationEmail // SOPORTADO POR V5 PARCHEADO
             };
 
             // alert("2. DATOS A ENVIAR (V5 Robust):\n" + JSON.stringify(payloadData, null, 2)); // CLEANED
-            console.log("Calling RPC update_user_credentials_v5 with payload wrapper:", payloadData);
+            console.log("Calling RPC update_user_credentials_v5 (patched) with payload wrapper:", payloadData);
 
             // IMPORTANTE: Envolver en { payload: ... } porque la función SQL espera un parámetro llamado 'payload'
             const { data: rpcData, error: rpcError } = await supabase.rpc('update_user_credentials_v5', { payload: payloadData } as any);
@@ -322,11 +324,13 @@ Esta acción es IRREVERSIBLE y eliminará tanto su perfil como su cuenta de acce
                 throw rpcError;
             }
 
-            // Mostrar resultado detallado de la V5
-            // alert("3. ¡Respuesta del servidor V5!\n" + JSON.stringify(rpcData, null, 2)); // CLEANED
-            console.log("RPC Success: Auth User & Profile Synced Atomically.", rpcData);
+            // Mostrar resultado detallado de la Sincronización
+            console.log(`RPC Success: [${rpcData?.version || 'v5_legacy'}] Auth User & Profile Synced.`);
+            if (rpcData?.debug) {
+                console.log("DETALLES DE PERSISTENCIA:", rpcData.debug);
+            }
 
-            // 1. Si es el usuario actual, usar la API nativa de Supabase como redundancia y seguridad
+            // 1. Si es el usuario actual, usar la API nativa de Supabase como redundancia y seguridad para la sesión actual
             if (currentUser && currentUser.id === userId) {
                 const userUpdates: any = {
                     data: {
@@ -340,22 +344,6 @@ Esta acción es IRREVERSIBLE y eliminará tanto su perfil como su cuenta de acce
                 if (editingEmail && editingEmail !== currentUser.email) userUpdates.email = editingEmail;
 
                 await supabase.auth.updateUser(userUpdates);
-            }
-
-            // Always update permissions in profiles table
-            await supabase.from('profiles').update({
-                full_name: editingUserName,
-                role: editingRole,
-                allowed_menus: editingAllowedMenus,
-                notification_email: editingNotificationEmail,
-                operational_level: editingOperationalLevel,
-                is_field_tech: editingIsFieldTech,
-                permissions: editingPermissions
-            }).eq('id', userId);
-
-            // Update notification email directly
-            if (editingNotificationEmail !== undefined) {
-                await supabase.from('profiles').update({ notification_email: editingNotificationEmail }).eq('id', userId);
             }
 
             alert('Usuario actualizado correctamente (Sincronización Total)');
@@ -1103,7 +1091,7 @@ Esta acción es IRREVERSIBLE y eliminará tanto su perfil como su cuenta de acce
                                                                 <label className="flex items-center gap-3 text-xs cursor-pointer group p-1 hover:bg-white rounded-lg transition-colors">
                                                                     <input
                                                                         type="checkbox"
-                                                                        checked={editingPermissions?.inventory?.can_manage || false}
+                                                                        checked={editingPermissions?.inventory?.can_manage ?? editingRole === 'admin'}
                                                                         onChange={(e) => {
                                                                             setEditingPermissions({
                                                                                 ...editingPermissions,
@@ -1122,7 +1110,7 @@ Esta acción es IRREVERSIBLE y eliminará tanto su perfil como su cuenta de acce
                                                                 <label className="flex items-center gap-3 text-xs cursor-pointer group p-1 hover:bg-white rounded-lg transition-colors">
                                                                     <input
                                                                         type="checkbox"
-                                                                        checked={editingPermissions?.ticket_management?.can_edit || false}
+                                                                        checked={editingPermissions?.ticket_management?.can_edit ?? editingRole === 'admin'}
                                                                         onChange={(e) => {
                                                                             setEditingPermissions({
                                                                                 ...editingPermissions,
@@ -1140,7 +1128,7 @@ Esta acción es IRREVERSIBLE y eliminará tanto su perfil como su cuenta de acce
                                                                 <label className="flex items-center gap-3 text-xs cursor-pointer group p-1 hover:bg-white rounded-lg transition-colors">
                                                                     <input
                                                                         type="checkbox"
-                                                                        checked={editingPermissions?.ticket_management?.can_escalate || false}
+                                                                        checked={editingPermissions?.ticket_management?.can_escalate ?? editingRole === 'admin'}
                                                                         onChange={(e) => {
                                                                             setEditingPermissions({
                                                                                 ...editingPermissions,

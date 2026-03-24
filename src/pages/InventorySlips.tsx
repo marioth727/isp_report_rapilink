@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { SignaturePad } from '../components/ui/SignaturePad';
+import { canManageInventory } from '../lib/permissions';
 import clsx from 'clsx';
 
 export default function InventorySlips() {
@@ -694,7 +695,7 @@ export default function InventorySlips() {
                                             {mode === 'morning' && (
                                                 <>
                                                     {/* Full Return - Only for authorized roles */}
-                                                    {(userPermissions?.inventory?.can_manage || currentUser?.role === 'admin' || currentUser?.role === 'almacen') && (
+                                                    {canManageInventory({ role: currentUser?.user_metadata?.role, permissions: userPermissions } as any) && (
                                                         <>
                                                             {/* Edit Quantity (Partial Return) */}
                                                             {(!item.inventory_items?.is_serialized || item.quantity > 1) && (

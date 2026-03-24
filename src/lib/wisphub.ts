@@ -209,6 +209,33 @@ export const WisphubService = {
         }
     },
 
+    /**
+     * Busca un cliente en WispHub por su cédula o id_servicio y devuelve sus datos en crudo (incluyendo sn_onu)
+     */
+    async getClientForSmartOlt(cedula?: string, idServicio?: number): Promise<any | null> {
+        if (!cedula && !idServicio) return null;
+        try {
+            let url = `${BASE_URL}/clientes/?limit=10`;
+            if (idServicio) {
+                url += `&id_servicio=${idServicio}`;
+            } else if (cedula) {
+                url += `&cedula=${encodeURIComponent(cedula)}`;
+            }
+
+            const response = await safeFetch(url);
+            if (!response.ok) return null;
+            const data = await response.json();
+            const results = data.results || (Array.isArray(data) ? data : []);
+            if (results.length > 0) {
+                return results[0];
+            }
+            return null;
+        } catch (error) {
+            console.error('[WisphubService] Error fetching client for SmartOLT:', error);
+            return null;
+        }
+    },
+
     async getAllClients(page: number = 1, limit: number = 20, filters?: { plan?: string; status?: string }): Promise<{ results: WispHubClient[], count: number }> {
         try {
             const offset = (page - 1) * limit;

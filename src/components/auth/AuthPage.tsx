@@ -1,5 +1,5 @@
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { supabase } from '../../lib/supabase';
 
 export function AuthPage() {
@@ -8,12 +8,8 @@ export function AuthPage() {
     const [password, setPassword] = useState('');
     const [message, setMessage] = useState('');
 
-    useEffect(() => {
-        // PURGA AUTOMÁTICA: Si llegamos a la pantalla de login, limpiamos cualquier rastro corrupto
-        localStorage.removeItem('sb-rapilink-auth-token');
-        localStorage.removeItem('rapilink-auth-session');
-        supabase.auth.signOut().catch(() => { });
-    }, []);
+    // Se removió el useEffect de purga automática que destruía la sesión prematuramente
+
 
     const handleAuth = async (e: React.FormEvent) => {
         e.preventDefault();

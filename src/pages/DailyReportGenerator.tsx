@@ -106,6 +106,7 @@ export function DailyReportGenerator() {
     const handleExit = async () => {
         const confirm = window.confirm('¿Deseas cerrar sesión del sistema?');
         if (confirm) {
+            (window as any).__isIntentionalLogout = true;
             await supabase.auth.signOut();
             window.location.href = '/login';
         } else {

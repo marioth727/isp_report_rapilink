@@ -8,23 +8,31 @@ if (!supabaseUrl || !supabaseAnonKey) {
   throw new Error('Supabase URL and Anon Key are required in .env');
 }
 
+// 🛡️ STORAGE ANTI-500: Previene que Supabase borre la sesión si falla el refresh token
+const safeStorage = {
+  getItem: (key: string) => {
+    return window.localStorage.getItem(key);
+  },
+  setItem: (key: string, value: string) => {
+    window.localStorage.setItem(key, value);
+  },
+  removeItem: (key: string) => {
+    // Si la sesión cae por error de red 500, no borramos el localStorage
+    if (key.includes('sb-rapilink-auth-token') && !(window as any).__isIntentionalLogout) {
+      console.warn(`[Supabase:Storage] 🛡️ Ignorando intento de borrar '${key}'. Posible error 500 de API.`);
+      return; 
+    }
+    window.localStorage.removeItem(key);
+  }
+};
+
 export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: {
     persistSession: true,
     autoRefreshToken: true,
     detectSessionInUrl: true,
-    storageKey: 'sb-rapilink-auth-token',
-    storage: {
-      getItem: (key) => localStorage.getItem(key),
-      setItem: (key, value) => {
-        if (value) localStorage.setItem(key, value);
-      },
-      removeItem: (key) => {
-        // Permitimos el borrado nativo para evitar bucles infinitos con tokens corruptos
-        console.warn(`[Auth] 🚨 Supabase eliminó el token local '${key}'.`);
-        localStorage.removeItem(key);
-      }
-    }
+    storage: safeStorage,
+    storageKey: 'sb-rapilink-auth-token'
   }
 });
 

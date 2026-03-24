@@ -50,7 +50,7 @@ export const SmartOLTService = {
     /**
      * Obtiene la señal detallada de un equipo.
      */
-    async getOnuSignal(serialNumber: string): Promise<number | null> {
+    async getOnuSignal(serialNumber: string): Promise<{ rx: number | null, tx: number | null } | null> {
         try {
             // 1. Intentar buscar en equipos YA PROVISIONADOS
             const status = await this.verifyAssetStatus(serialNumber);
@@ -58,14 +58,18 @@ export const SmartOLTService = {
             if (status && status.id) {
                 // Es un equipo activo, podemos pedir señal en tiempo real
                 const response = await fetch(`/api/smartolt/onu/get_onu_signal/${status.id}`);
-                if (!response.ok) return status.signal_dbm || null;
+                if (!response.ok) return { rx: status.signal_dbm || null, tx: null };
 
                 const data = await response.json();
                 if (data.status && data.onu_signal_1490) {
-                    const signal = parseFloat(data.onu_signal_1490.replace(' dBm', ''));
-                    return isNaN(signal) ? status.signal_dbm : signal;
+                    const rx = parseFloat(data.onu_signal_1490.replace(' dBm', ''));
+                    const tx = data.onu_signal_1310 ? parseFloat(data.onu_signal_1310.replace(' dBm', '')) : null;
+                    return {
+                        rx: isNaN(rx) ? status.signal_dbm : rx,
+                        tx: isNaN(tx!) ? null : tx
+                    };
                 }
-                return status.signal_dbm || null;
+                return { rx: status.signal_dbm || null, tx: null };
             }
 
             // 2. Si no es provisionado, buscar en DEPOSITO / NO CONFIGURADOS
@@ -82,7 +86,8 @@ export const SmartOLTService = {
             if (match) {
                 // SmartOLT suele mandar la señal en el objeto de unconfigured
                 // Si no viene, devolvemos null y el UI deberá pedir manual o justificación
-                return (match as any).signal ? parseFloat((match as any).signal) : null;
+                const signal = (match as any).signal ? parseFloat((match as any).signal) : null;
+                return { rx: signal, tx: null };
             }
 
             return null;

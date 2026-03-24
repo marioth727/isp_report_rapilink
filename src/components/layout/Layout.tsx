@@ -389,6 +389,7 @@ export function Layout() {
     }, [location.pathname]);
 
     const handleLogout = async () => {
+        (window as any).__isIntentionalLogout = true;
         await supabase.auth.signOut();
         navigate('/login');
     };
