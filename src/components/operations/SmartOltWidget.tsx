@@ -42,7 +42,8 @@ export function SmartOltWidget({ cedula, idServicio, nombre }: SmartOltWidgetPro
                     return;
                 }
 
-                const sn = clientDetails.sn_onu;
+                // Preferimos sn_onu, pero a menudo WispHub guarda el serial en mac_onu
+                const sn = clientDetails.sn_onu || clientDetails.mac_onu;
                 setSnOnu(sn || null);
 
                 if (!sn) {
