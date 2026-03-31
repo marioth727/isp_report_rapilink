@@ -1,5 +1,5 @@
-
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../lib/supabase';
 
 export function AuthPage() {
@@ -7,9 +7,9 @@ export function AuthPage() {
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
     const [message, setMessage] = useState('');
+    const navigate = useNavigate();
 
     // Se removió el useEffect de purga automática que destruía la sesión prematuramente
-
 
     const handleAuth = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -22,6 +22,9 @@ export function AuthPage() {
                 password,
             });
             if (error) throw error;
+            
+            // Redirección forzada inmediata para evitar la sensación de congelamiento
+            navigate('/', { replace: true });
         } catch (error: any) {
             console.error("Auth Error:", error);
             setMessage(error.message);
@@ -53,8 +56,9 @@ export function AuthPage() {
                             type="email"
                             value={email}
                             onChange={(e) => setEmail(e.target.value)}
-                            className="w-full px-3 py-2 bg-background border border-input rounded focus:ring-2 focus:ring-ring focus:outline-none"
+                            className="w-full px-3 py-2 bg-background border border-input rounded focus:ring-2 focus:ring-ring focus:outline-none disabled:opacity-50"
                             required
+                            disabled={loading}
                         />
                     </div>
                     <div>
@@ -63,8 +67,9 @@ export function AuthPage() {
                             type="password"
                             value={password}
                             onChange={(e) => setPassword(e.target.value)}
-                            className="w-full px-3 py-2 bg-background border border-input rounded focus:ring-2 focus:ring-ring focus:outline-none"
+                            className="w-full px-3 py-2 bg-background border border-input rounded focus:ring-2 focus:ring-ring focus:outline-none disabled:opacity-50"
                             required
+                            disabled={loading}
                         />
                     </div>
                     <button
