@@ -33,7 +33,7 @@ export const SmartOLTService = {
                     sn: onu.sn || serialNumber,
                     name: onu.name,
                     status: onu.status.toLowerCase(),
-                    signal_dbm: parseFloat(onu.signal) || 0,
+                    signal_dbm: parseFloat(onu.signal_1490) || parseFloat(onu.signal) || 0,
                     olt_name: onu.olt_name,
                     pon_port: onu.pon_port,
                     mac: onu.mac_address || onu.mac || "",

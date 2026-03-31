@@ -27,7 +27,67 @@ export const REQUIREMENTS: Record<string, { minPhotos: number, requiresMaterials
     'DEFAULT': { minPhotos: 1, requiresMaterials: false }
 };
 
+export interface CompleteOptions {
+    files?: (File | Blob)[];
+    statusId?: number;
+    signal?: string;
+}
+
 export const WorkflowService = {
+    /**
+     * RADAR DE HOY (Sincronización de Segundo Plano Ligera)
+     * Solo jala los tickets creados HOY para ver si hay algo nuevo.
+     */
+    async radarSyncToday(): Promise<void> {
+        if ((window as any)._isRadarRunning) return;
+        (window as any)._isRadarRunning = true;
+        
+        try {
+            console.log('[Radar-Hoy] 📡 Escaneando WispHub por tickets capturados hoy...');
+            const today = new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD
+            
+            // Petición ultraligera: solo de hoy, todos los estados vivos
+            const recentTickets = await WisphubService.getAllTickets({ 
+                startDate: today, 
+                endDate: today,
+                status: '1,2,5' 
+            });
+
+            if (recentTickets.length > 0) {
+                console.log(`[Radar-Hoy] 🎯 Detectados ${recentTickets.length} tickets activos hoy. Sincronizando con espejo local...`);
+                // Mandamos a grabar/revalidar al espejo para que el WebSocket de Supabase dispare el UI
+                await this.syncMirrorBatch(recentTickets);
+            }
+        } catch (e) {
+            console.warn('[Radar-Hoy] Error en escaneo ligero:', e);
+        } finally {
+            (window as any)._isRadarRunning = false;
+        }
+    },
+
+    /**
+     * Sincronización en lote de tickets hacia el espejo local (Supabase)
+     */
+    async syncMirrorBatch(tickets: any[]): Promise<void> {
+        if (!tickets || tickets.length === 0) return;
+        
+        for (const t of tickets) {
+            // Upsert al espejo local
+            const { error } = await supabase
+                .from('workflow_processes')
+                .upsert({
+                    reference_id: String(t.id),
+                    process_type: 'Ticket AXCES',
+                    title: t.asunto || `Ticket #${t.id}`,
+                    status: (t.id_estado === 3 || t.id_estado === 4) ? 'CO' : 'PE',
+                    metadata: t,
+                    priority: t.prioridad === 'Alta' ? 3 : t.prioridad === 'Media' ? 2 : 1
+                }, { onConflict: 'reference_id' });
+            
+            if (error) console.error(`[Radar] Error sincronizando ticket ${t.id}:`, error);
+        }
+    },
+
     // --- PROCESOS ---
     async createProcess(data: {
         process_type: string;
@@ -106,12 +166,12 @@ export const WorkflowService = {
             console.log('[Detective] 🕵️‍♂️ Iniciando purga/sincronización silenciosa de desajustes...');
 
             // 1. Obtener todos los abiertos en Supabase (solo los activos para no procesar 8000 filas)
+            // FIXED: Tomamos TODOS los 'PE' porque si la metadata está corrupta se quedan atorados "en el aire"
             const { data: localOpenItems } = await supabase
                 .from('workflow_processes')
                 .select('id, metadata')
                 .eq('process_type', 'Ticket AXCES')
-                .eq('status', 'PE')
-                .in('metadata->>id_estado', ['1', '2', '5']); // Nuevo, En Progreso, Reagendado
+                .eq('status', 'PE');
 
             if (!localOpenItems || localOpenItems.length === 0) {
                 console.log('[Detective] No hay tickets abiertos localmente. Nada que purgar.');
@@ -121,6 +181,7 @@ export const WorkflowService = {
             console.log(`[Detective] Evaluando ${localOpenItems.length} tickets locales abiertos...`);
 
             // 2. Obtener la fuente de verdad: Tickets Abiertos Reales de WispHub (Últimos 60 días)
+            // Ya es secuencial por dentro de getAllTickets
             const openInWispHub = await WisphubService.getAllTickets({ status: '1,2,5' });
 
             // SEGURIDAD NACIONAL: Si WispHub devolvió 0 tickets o la red falló, 
@@ -137,10 +198,10 @@ export const WorkflowService = {
             let purges = 0;
             let fixes = 0;
 
-            // Acumular cambios para aplicarlos en batch (NO en serie para no bloquear la conexión)
-            const toPurge: string[] = [];
+            // Acumular cambios para aplicarlos en batch
             const purgedMetas: any[] = [];
             const toFix: Array<{ id: string; metadata: any }> = [];
+            const toPurge: string[] = [];
 
             // 3. Evaluar discrepancias
             for (const local of localOpenItems) {
@@ -152,7 +213,8 @@ export const WorkflowService = {
                 if (!truthTicket) {
                     purges++;
                     toPurge.push(local.id);
-                    purgedMetas.push({ id: local.id, metadata: { ...local.metadata, id_estado: 4, nombre_estado: 'Cerrado/Purgado por Detective' }, status: 'Completed' });
+                    // FIXED: El status válido en la BD de Supabase es 'CO' (Closed), no la palabra 'Completed'
+                    purgedMetas.push({ id: local.id, metadata: { ...local.metadata, id_estado: 4, nombre_estado: 'Cerrado/Purgado por Detective' }, status: 'CO' });
                     continue;
                 }
 
@@ -174,7 +236,7 @@ export const WorkflowService = {
                     const chunk = purgedMetas.slice(i, i + CHUNK_SIZE);
                     await Promise.all(chunk.map((item: any) =>
                         supabase.from('workflow_processes')
-                            .update({ metadata: item.metadata, status: 'Completed' })
+                            .update({ metadata: item.metadata, status: item.status })
                             .eq('id', item.id)
                     ));
                     if (purgedMetas.length > 100 && i % (CHUNK_SIZE * 5) === 0) {
@@ -427,7 +489,8 @@ export const WorkflowService = {
 
             const profileIds = new Set(finalUsers.map(u => u.id));
 
-            for (const id of uniqueIds) {
+            for (const item of uniqueIds) {
+                const id = String(item);
                 if (!profileIds.has(id)) {
                     finalUsers.push({
                         id,
@@ -565,19 +628,23 @@ export const WorkflowService = {
         }
     },
 
-    async completeAndSyncWorkItem(workItemId: string, resolution: string, options: { files?: (File | Blob)[], statusId?: number } = {}) {
+    async completeAndSyncWorkItem(workItemId: string, resolution: string, options: CompleteOptions = {}) {
         try {
             const finalStatusId = options.statusId || 4;
+            const signalValue = options.signal || '';
+
             // 1. Obtener detalles del item
             const { data: item } = await supabase
                 .from('workflow_workitems')
-                .select('*, workflow_activities(workflow_processes(reference_id))')
+                .select('*, workflow_activities(id, process_id, workflow_processes(reference_id, metadata))')
                 .eq('id', workItemId)
                 .single();
 
             if (!item) return false;
 
             const ticketId = item.workflow_activities?.workflow_processes?.reference_id;
+            const processId = item.workflow_activities?.process_id;
+            const currentMetadata = item.workflow_activities?.workflow_processes?.metadata || {};
 
             // 2. Marcar workitem como completado localmente
             const { error: localError } = await supabase
@@ -587,15 +654,30 @@ export const WorkflowService = {
 
             if (localError) throw localError;
 
-            // 3. Sincronizar con WispHub
+            // 3. Actualizar metadata del proceso con la potencia
+            if (processId && signalValue) {
+                await supabase
+                    .from('workflow_processes')
+                    .update({ 
+                        metadata: { 
+                            ...currentMetadata, 
+                            potencia: signalValue 
+                        } 
+                    })
+                    .eq('id', processId);
+            }
+
+            // 4. Sincronizar con WispHub
             if (ticketId) {
                 const files = options.files || [];
                 const firstFile = files[0];
                 const extraFiles = files.slice(1);
 
-                // A. Foto principal y cierre (Ahora integrado en updateTicketStatus)
-                // Usamos una copia de la resolución que aumentaremos si hay fotos extras
+                // Prepend signal information to resolution
                 let finalResolution = resolution;
+                if (signalValue) {
+                    finalResolution = `--- POTENCIA ÓPTICA: ${signalValue} dBm ---\n\n${resolution}`;
+                }
 
                 // B. Evidencias adicionales en Supabase + HTML
                 if (extraFiles.length > 0) {
@@ -628,7 +710,7 @@ export const WorkflowService = {
 
                     if (extraLinks.length > 0) {
                         const textLinks = extraLinks.map((url, idx) => `Evidencia #${idx + 2}:\n${url}`).join('\n\n');
-                        finalResolution = `${resolution}\n\n--- EVIDENCIAS ADICIONALES ---\n${textLinks}`;
+                        finalResolution = `${finalResolution}\n\n--- EVIDENCIAS ADICIONALES ---\n${textLinks}`;
                     }
                 }
 
@@ -1075,49 +1157,56 @@ export const WorkflowService = {
                 return false;
             }
 
-            // 3. Recursive Ticket Fetching & Local Filter (Deep 60 days vs Quick 10 days)
-            const daysBack = forceFull ? 60 : 30;
-            let allApiTickets: any[] = [];
-            let page = 1;
-            let hasMore = true;
-
+            // 3. Recursive Ticket Fetching & Local Filter (Deep 30 days vs Normal 7 days)
+            // --- ESTRATEGIA DE SINCRONIZACIÓN POR NIVELES ---
+            // FASE 1: ABIERTOS (60 días) - Prioritario para que no se pierdan tareas pendientes.
             const now = new Date();
-            const pastDate = new Date();
-            pastDate.setDate(now.getDate() - daysBack);
-            const startDateStr = pastDate.toISOString().split('T')[0];
+            const pastOpen = new Date();
+            pastOpen.setDate(now.getDate() - 60);
+            const openStartDate = pastOpen.toISOString().split('T')[0];
             const endDateStr = new Date(now.getTime() + 86400000).toISOString().split('T')[0];
 
-            console.log(`[Sync] 📥 Fetching tickets from ${startDateStr} to ${endDateStr} (Depth: ${daysBack}d) FILTERED by Tech ID: ${staffMember.id} ("${techNameStr}")`);
-
-
-            while (hasMore && page <= (forceFull ? 50 : 20)) {
-                // [REQUEST] URL y Parámetros
-                const fetchFilters = {
-                    startDate: startDateStr,
+            console.log(`[Sync:N1] 🔍 Buscando Tareas ABIERTAS en ventana de 60 días (${openStartDate} -> ${endDateStr})...`);
+            
+            let allApiTickets: any[] = [];
+            
+            try {
+                const { results: openResults } = await WisphubService.getAllTicketsPage(1, { 
+                    startDate: openStartDate, 
                     endDate: endDateStr,
-                    // tecnico: techIdForApi // REMOVIDO: WispHub omite tickets sin ID técnico en este filtro.
-                };
-                console.log(`[REQUEST] Page: ${page} | Filters:`, fetchFilters);
+                    status: '1,2' 
+                });
+                if (openResults) allApiTickets = [...openResults];
+                console.log(`[Sync:N1] ✅ Fase Abiertos completada: ${openResults?.length || 0} encontrados.`);
+            } catch (e) {
+                console.error("[Sync:N1] ⚠️ Error en fase abiertos:", e);
+            }
 
-                const { results, count } = await WisphubService.getAllTicketsPage(page, fetchFilters);
+            // FASE 2: HISTORIAL RECIENTE (7-30 días) - Para auditoría y tareas recién terminadas.
+            const daysBack = forceFull ? 30 : 7;
+            const pastHistory = new Date();
+            pastHistory.setDate(now.getDate() - daysBack);
+            const historyStartDate = pastHistory.toISOString().split('T')[0];
 
-                // [RESPONSE] Resultado de la API
-                console.log(`[RESPONSE] Page: ${page} | Results: ${results?.length || 0} | Total Count: ${count}`);
+            console.log(`[Sync:N2] 🔍 Sincronizando HISTORIAL RECIENTE (${daysBack} días)...`);
+            
+            let page = 1;
+            let hasMore = true;
+            while (hasMore && page <= (forceFull ? 10 : 3)) {
+                const { results, count } = await WisphubService.getAllTicketsPage(page, {
+                    startDate: historyStartDate,
+                    endDate: endDateStr
+                });
 
-                const ticketsPage = results || [];
-
-                if (ticketsPage.length > 0) {
-                    allApiTickets = [...allApiTickets, ...ticketsPage];
-
-                    // Si ya tenemos todos los que reporta el count total, paramos.
-                    if (allApiTickets.length >= count || ticketsPage.length < 50) {
-                        hasMore = false;
-                    }
+                if (results && results.length > 0) {
+                    const newTickets = results.filter((t: any) => !allApiTickets.some(at => at.id === t.id));
+                    allApiTickets = [...allApiTickets, ...newTickets];
+                    if (allApiTickets.length >= count || results.length < 50) hasMore = false;
                     page++;
                 } else {
                     hasMore = false;
                 }
-                await new Promise(r => setTimeout(r, 100)); // Pequeña pausa de cortesía para el proxy
+                await new Promise(r => setTimeout(r, 100));
             }
 
             console.log(`[Sync] 📦 Total Active Tickets in API for this Tech: ${allApiTickets.length}`);
@@ -1493,8 +1582,8 @@ export const WorkflowService = {
         try {
             console.log('[FullSync] 🚀 Iniciando Resincronización Profunda del Espejo...');
             
-            // Paso 1: Traer lo nuevo/actualizado de los últimos 30 días
-            await this.syncGlobalTickets(30, onProgress);
+            // Paso 1: Traer lo nuevo/actualizado de los últimos 60 días (acorde a nueva política)
+            await this.syncGlobalTickets(60, onProgress);
             
             // Paso 2: Purga estricta de "fantasmas" re-revisando contra WispHub
             await this.silentDetectiveSync({ force: true });

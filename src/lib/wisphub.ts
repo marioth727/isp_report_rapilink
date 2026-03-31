@@ -75,7 +75,10 @@ let SUBJECTS_FETCH_FAILED = false;
 
 export function toProxyUrl(url: string | null): string | null {
     if (!url) return null;
-    return url.replace(/https?:\/\/(api\.)?wisphub\.(io|net)\/api\/(v1\/)?/, BASE_URL + '/');
+    // BLINDAJE INVIOLABLE: Forzar siempre .io, ignorando cualquier intento de .net
+    // El proxy de Vite se encarga de dirigirlo a https://api.wisphub.io
+    const sanitizedUrl = url.replace(/wisphub\.net/g, 'wisphub.io');
+    return sanitizedUrl.replace(/https?:\/\/(api\.)?wisphub\.io\/api\/(v1\/)?/, BASE_URL + '/');
 }
 
 export async function safeFetch(url: string, options: RequestInit = {}, retries = 2, silent = false): Promise<Response> {
@@ -209,29 +212,69 @@ export const WisphubService = {
         }
     },
 
-    /**
-     * Busca un cliente en WispHub por su cédula o id_servicio y devuelve sus datos en crudo (incluyendo sn_onu)
-     */
-    async getClientForSmartOlt(cedula?: string, idServicio?: number): Promise<any | null> {
-        if (!cedula && !idServicio) return null;
+    async getClientForSmartOlt(cedula?: string, idServicio?: number, nombre?: string): Promise<any | null> {
+        if (!cedula && !idServicio && !nombre) {
+            console.warn('[WispHub] No se proporcionaron datos suficientes para buscar cliente.');
+            return null;
+        }
+
+        const cleanCedula = cedula?.trim() || '';
+        const cleanIdServicio = idServicio || null;
+        const cleanNombre = nombre?.trim() || '';
+
+        console.log(`[WispHub] 📡 Iniciando búsqueda de cliente para diagnóstico óptico:`, { 
+            cedula: cleanCedula, 
+            idServicio: cleanIdServicio,
+            nombre: cleanNombre
+        });
+
         try {
-            let url = `${BASE_URL}/clientes/?limit=10`;
-            if (idServicio) {
-                url += `&id_servicio=${idServicio}`;
-            } else if (cedula) {
-                url += `&cedula=${encodeURIComponent(cedula)}`;
+            // Intento 1: ID de Servicio (El más preciso)
+            if (cleanIdServicio) {
+                const url = `${BASE_URL}/clientes/?id_servicio=${cleanIdServicio}`;
+                const response = await safeFetch(url);
+                if (response.ok) {
+                    const data = await response.json();
+                    const results = data.results || (Array.isArray(data) ? data : []);
+                    if (results.length > 0) {
+                        console.log(`[WispHub] ✅ Cliente encontrado por id_servicio: ${results[0].nombre}`);
+                        return results[0];
+                    }
+                }
             }
 
-            const response = await safeFetch(url);
-            if (!response.ok) return null;
-            const data = await response.json();
-            const results = data.results || (Array.isArray(data) ? data : []);
-            if (results.length > 0) {
-                return results[0];
+            // Intento 2: Cédula
+            if (cleanCedula && cleanCedula !== "") {
+                const url = `${BASE_URL}/clientes/?cedula=${encodeURIComponent(cleanCedula)}`;
+                const response = await safeFetch(url);
+                if (response.ok) {
+                    const data = await response.json();
+                    const results = data.results || (Array.isArray(data) ? data : []);
+                    if (results.length > 0) {
+                        console.log(`[WispHub] ✅ Cliente encontrado por cédula: ${results[0].nombre}`);
+                        return results[0];
+                    }
+                }
             }
+
+            // Intento 3: Nombre (Búsqueda general por aproximación)
+            if (cleanNombre && cleanNombre !== "") {
+                const url = `${BASE_URL}/clientes/?nombre=${encodeURIComponent(cleanNombre)}`;
+                const response = await safeFetch(url);
+                if (response.ok) {
+                    const data = await response.json();
+                    const results = data.results || (Array.isArray(data) ? data : []);
+                    if (results.length > 0) {
+                        console.log(`[WispHub] ✅ Cliente encontrado por nombre: ${results[0].nombre}`);
+                        return results[0];
+                    }
+                }
+            }
+
+            console.warn(`[WispHub] ❌ No se encontró cliente con los parámetros proporcionados.`);
             return null;
         } catch (error) {
-            console.error('[WisphubService] Error fetching client for SmartOLT:', error);
+            console.error('[WispHub] Error en getClientForSmartOlt:', error);
             return null;
         }
     },
@@ -622,11 +665,34 @@ export const WisphubService = {
             // Asegurar que el staff esté cargado para mapear nombres reales
             await this.getStaff();
 
+            // Manejo optimizado para múltiples estados separados por comas
+            if (filters?.status && filters.status.includes(',')) {
+                // SEGURIDAD & RATE LIMIT: Fetch secuencial (uno tras otro)
+                // Usar for...of para evitar saturar WispHub.io con 3 peticiones pesadas al unísono
+                const statusList = filters.status.split(',');
+                const finalMap = new Map<string, any>();
+                
+                console.log(`[WispHub.io] 🛡️ Iniciando fetch secuencial para estados: ${filters.status}`);
+                
+                for (const st of statusList) {
+                    const tickets = await this.getAllTickets({ ...filters, status: st });
+                    for (const t of tickets) {
+                        finalMap.set(String(t.id), t);
+                    }
+                    // Breve pausa técnica de 200ms entre estados para mayor seguridad
+                    await new Promise(r => setTimeout(r, 200));
+                }
+                
+                const resultArr = Array.from(finalMap.values());
+                if (onProgress) onProgress(resultArr.length, resultArr.length);
+                return resultArr;
+            }
+
             const pageSize = 50;
             let baseUrl = `${BASE_URL}/tickets/?limit=${pageSize}&offset=0&ordering=-id`;
 
             if (filters?.status && !filters.status.includes(',')) {
-                baseUrl += `&id_estado=${filters.status}`;
+                baseUrl += `&estado=${filters.status}`; // OJO: WispHub API requiere 'estado', NO 'id_estado'
             }
 
             // Lógica de fechas
@@ -634,21 +700,21 @@ export const WisphubService = {
                 const start = filters.startDate || '2024-01-01';
                 const end = filters.endDate || new Date().toISOString().split('T')[0];
                 baseUrl += `&fecha_creacion_0=${start}&fecha_creacion_1=${end}`;
-            } else if (filters?.status && (filters.status.includes('1') || filters.status.includes('2'))) {
+            } else if (filters?.status && (filters.status === '1' || filters.status === '2' || filters.status === '5')) {
                 const past = new Date();
-                past.setDate(past.getDate() - 60); // WispHub NO acepta más de 60 días
+                past.setDate(past.getDate() - 60); // 60 días para buscar tickets abiertos
                 const start = past.toISOString().split('T')[0];
                 const end = new Date().toISOString().split('T')[0];
                 baseUrl += `&fecha_creacion_0=${start}&fecha_creacion_1=${end}`;
             } else {
                 const past = new Date();
-                past.setDate(past.getDate() - 30);
+                past.setDate(past.getDate() - 7); // Reducido de 30 a 7
                 const start = past.toISOString().split('T')[0];
                 const end = new Date().toISOString().split('T')[0];
                 baseUrl += `&fecha_creacion_0=${start}&fecha_creacion_1=${end}`;
             }
 
-            console.log(`[REQUEST] URL Base: ${baseUrl}`);
+            console.log(`[REQUEST] URL Base Tickets WispHub: ${baseUrl}`);
 
             const firstResponse = await safeFetch(baseUrl);
             if (!firstResponse.ok) return [];
@@ -670,8 +736,8 @@ export const WisphubService = {
             if (onProgress) onProgress(uniqueTicketsMap.size, totalCount);
 
             const remainingOffsets = [];
-            // Aumentamos el límite de seguridad a 15,000 para no truncar datos reales
-            for (let offset = pageSize; offset < totalCount && offset < 15000; offset += pageSize) {
+            // Aumentamos el límite de seguridad a 2,000 (40 páginas) para no saturar memoria/vps
+            for (let offset = pageSize; offset < totalCount && offset < 2000; offset += pageSize) {
                 remainingOffsets.push(offset);
             }
 
@@ -703,10 +769,6 @@ export const WisphubService = {
     },
 
     mapTicket(t: any) {
-        // Log de diagnóstico para tickets sin nombre
-        if (!t.nombre_cliente && !t.cliente && !t.cliente_nombre) {
-            console.warn(`[Wisphub Diagnostic] Ticket #${t.id_ticket || t.id} sin campos de nombre estándar. Keys:`, Object.keys(t));
-        }
 
         // --- EXTRACCIÓN DE HORA DE LLEGADA (NUEVO) ---
         let fechaLlegada: string | null = null;

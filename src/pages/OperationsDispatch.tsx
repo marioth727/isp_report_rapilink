@@ -94,6 +94,8 @@ interface DispatchTicket {
     barrio: string;
     prioridad: string;
     id_prioridad: number;
+    id_estado: number;
+    nombre_estado: string;
     score: number;
     recurrence: number;
     fecha_creacion: string;
@@ -237,8 +239,16 @@ export function OperationsDispatch() {
             WorkflowService.silentDetectiveSync().catch(console.error);
         }, 3000); // 3 segundos de retraso para no competir con el fetch inicial
 
+        // --- RADAR DE SEGUNDO PLANO (NUEVO) ---
+        // Escanea tickets nuevos creados HOY cada 2 minutos
+        const radarInterval = setInterval(() => {
+            console.log('[Radar-Hoy] 📡 Iniciando escaneo automático de tickets de hoy...');
+            WorkflowService.radarSyncToday().catch(console.error);
+        }, 120000); // 2 minutos (120,000 ms)
+
         return () => {
             supabase.removeChannel(channel);
+            clearInterval(radarInterval);
         };
     }, [mutateMirror]);
 
@@ -1206,6 +1216,11 @@ export function OperationsDispatch() {
                                                                                         ? `${Math.floor(ticket.horas_abierto / 24)}d ${ticket.horas_abierto % 24}h`
                                                                                         : `${ticket.horas_abierto}h`}
                                                                                 </div>
+                                                                                {ticket.id_estado === 5 && (
+                                                                                    <div className="px-1.5 py-0.5 bg-amber-500 text-white text-[8px] font-black uppercase rounded shadow-sm animate-pulse">
+                                                                                        Escalado
+                                                                                    </div>
+                                                                                )}
                                                                             </div>
                                                                             {ticket.id_prioridad >= 4 && (
                                                                                 <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse shadow-[0_0_8px_rgba(239,68,68,0.5)]"></div>
@@ -1351,6 +1366,9 @@ export function OperationsDispatch() {
                                                                                             </h4>
                                                                                             <div className="flex items-center gap-1">
                                                                                                 <span className="text-[8px] font-black text-primary uppercase">#{ticket.id}</span>
+                                                                                                {ticket.id_estado === 5 && (
+                                                                                                    <span className="px-1 py-0.5 bg-amber-500 text-white text-[6px] font-black uppercase rounded shadow-sm">Escalado</span>
+                                                                                                )}
                                                                                                 <span className="text-[8px] font-medium text-slate-300">•</span>
                                                                                                 <span className="text-[8px] font-bold text-slate-400 uppercase truncate">{ticket.barrio}</span>
                                                                                             </div>
@@ -1467,6 +1485,7 @@ export function OperationsDispatch() {
                                         <SmartOltWidget 
                                             cedula={selectedTicket.cedula} 
                                             idServicio={selectedTicket.id_servicio ? Number(selectedTicket.id_servicio) : null} 
+                                            nombre={selectedTicket.nombre_cliente}
                                         />
                                     </div>
                                 )}

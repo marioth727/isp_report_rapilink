@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { CheckCircle2, Clock, ChevronRight, X, MessageSquare, AlertTriangle, RefreshCw, Layers, Package, MapPin, Play, Camera, Trash2 } from 'lucide-react';
+import { CheckCircle2, Clock, ChevronRight, X, MessageSquare, AlertTriangle, RefreshCw, Layers, Package, MapPin, Play, Camera, Trash2, Activity } from 'lucide-react';
 import { supabase, safeGetUser } from '../lib/supabase';
 import { WorkflowService, REQUIREMENTS } from '../lib/workflowService';
 import { WisphubService } from '../lib/wisphub';
@@ -24,6 +24,7 @@ export function OperationsMyTasks() {
     const [selectedTask, setSelectedTask] = useState<any | null>(null);
     const [actionType, setActionType] = useState<'complete' | 'escalate' | null>(null);
     const [comment, setComment] = useState('');
+    const [signal, setSignal] = useState(''); // Potencia Óptica
     const [targetTechnician, setTargetTechnician] = useState('');
     const [processing, setProcessing] = useState(false);
     const [platformUsers, setPlatformUsers] = useState<any[]>([]);
@@ -40,6 +41,7 @@ export function OperationsMyTasks() {
     const [userProfile, setUserProfile] = useState<any | null>(null); // RBAC State
     const [isEditModalOpen, setIsEditModalOpen] = useState(false); // Edit Modal State
     const [expandedTickets, setExpandedTickets] = useState<Set<string>>(new Set());
+    const [manualTicketId, setManualTicketId] = useState(''); // ID para búsqueda manual
 
     // --- SISTEMA DE BORRADORES (IndexedDB) ---
     // 1. Guardar fotos automáticamente cuando cambian
@@ -152,8 +154,44 @@ export function OperationsMyTasks() {
 
             console.log(`[MyTasks-Trace] 5. Query OK. Tickets devueltos por BD: ${data?.length || 0}`);
 
-            setMyTasks(data || []);
-            console.log(`[MyTasks-Trace] 6. Estado React (myTasks) actualizado.`);
+            // === Lógica de Ordenamiento Inteligente (Prioridad > Atrasados > Barrio > Fecha) ===
+            const sortedData = [...(data || [])].sort((a, b) => {
+                const getPrio = (t: any) => {
+                    const p = t.workflow_activities?.workflow_processes?.metadata?.prioridad || 'Normal';
+                    const map: Record<string, number> = { 'Muy Alta': 4, 'Alta': 3, 'Normal': 2, 'Media': 2, 'Baja': 1 };
+                    return map[p] || 2;
+                };
+
+                const isDelayed = (t: any) => {
+                    const dt = new Date(t.workflow_activities?.workflow_processes?.metadata?.fecha_creacion || t.created_at);
+                    const today = new Date();
+                    today.setHours(0, 0, 0, 0);
+                    return dt < today;
+                };
+
+                const getBarrio = (t: any) => (t.workflow_activities?.workflow_processes?.metadata?.barrio || 'Sin Barrio').toLowerCase().trim();
+                const getDate = (t: any) => new Date(t.workflow_activities?.workflow_processes?.metadata?.fecha_creacion || t.created_at).getTime();
+
+                // 1. Prioridad: Alta primero
+                const pA = getPrio(a); const pB = getPrio(b);
+                if (pA !== pB) return pB - pA;
+
+                // 2. Atrasado: Los de ayer/antes van primero
+                const dA = isDelayed(a); const dB = isDelayed(b);
+                if (dA && !dB) return -1;
+                if (!dA && dB) return 1;
+
+                // 3. Barrio: Agrupar por zona (orden alfabético para juntarlos)
+                const barA = getBarrio(a); const barB = getBarrio(b);
+                if (barA < barB) return -1;
+                if (barA > barB) return 1;
+
+                // 4. Antigüedad: El más viejo dentro del mismo barrio va primero
+                return getDate(a) - getDate(b);
+            });
+
+            setMyTasks(sortedData);
+            console.log(`[MyTasks-Trace] 6. Estado React (myTasks) ordenado inteligentemente y actualizado.`);
             console.log('=======================================\n');
 
             // Guardamos el perfil completo para RBAC
@@ -170,18 +208,50 @@ export function OperationsMyTasks() {
     };
 
 
-    // Función para sincronización profunda (60 días)
+    // Función para sincronización profunda (30 días)
     const handleDeepSync = async () => {
         if (syncing) return;
         setSyncing(true);
         try {
-            console.log('[MyTasks] 🚀 Iniciando Sincronización Profunda (60 días)...');
+            console.log('[MyTasks] 🚀 Iniciando Sincronización Profunda (30 días)...');
             await WorkflowService.syncMyTickets(true);
             await loadMyTasks();
             await syncTimelineWithEvents();
             console.log('[MyTasks] ✅ Sincronización Profunda completada.');
         } catch (error) {
             console.error('[MyTasks] ❌ Error en Deep Sync:', error);
+        } finally {
+            setSyncing(false);
+        }
+    };
+
+    // Función para buscar y sincronizar un ticket específico por ID
+    const handleManualTicketSync = async () => {
+        if (!manualTicketId || syncing) return;
+        setSyncing(true);
+        const toastId = "manual-sync-" + Date.now();
+        dispatchToast("Buscando ticket...", "loading", `Consultando ID #${manualTicketId}`, toastId);
+
+        try {
+            const ticket = await WisphubService.getTicketDetail(manualTicketId);
+            if (!ticket) {
+                dispatchToast("No encontrado", "error", `El ticket #${manualTicketId} no existe en WispHub.`, toastId);
+                return;
+            }
+
+            // Mapeamos perfiles para el sync mirror
+            const profiles = await WorkflowService.getPlatformUsers();
+            const { data: { user } } = await safeGetUser();
+            const authProfile = profiles.find((p: any) => p.id === user?.id || p.email === user?.email);
+
+            await WorkflowService.syncSingleTicketMirror(ticket, profiles, authProfile, { forceLocalOverride: true });
+
+            dispatchToast("Ticket Sincronizado", "success", `Se encontró y vinculó el ticket de ${ticket.nombre_cliente}`, toastId);
+            setManualTicketId('');
+            await loadMyTasks();
+        } catch (error) {
+            console.error('[ManualSync] Error:', error);
+            dispatchToast("Error de conexión", "error", "No se pudo sincronizar el ticket. Reintente.", toastId);
         } finally {
             setSyncing(false);
         }
@@ -383,21 +453,33 @@ export function OperationsMyTasks() {
                 description="Gestión centralizada de tickets y órdenes de servicio."
                 onSyncComplete={loadMyTasks}
                 customAction={
-                    <div className="flex items-center gap-2">
-                        {/* Indicador de Sincronización */}
-                        {syncing && (
-                            <div className="flex items-center gap-2 bg-zinc-50 text-zinc-600 px-3 py-1.5 rounded-full border border-zinc-200 animate-in fade-in shadow-sm">
-                                <RefreshCw size={12} className="animate-spin text-zinc-400" />
-                                <span className="text-[10px] font-bold uppercase tracking-wider">Sincronizando...</span>
-                            </div>
-                        )}
+                    <div className="flex flex-col md:flex-row items-stretch md:items-center gap-2">
+                        {/* Buscador Manual de Ticket */}
+                        <div className="flex items-center gap-2 bg-white border border-zinc-200 rounded-xl px-3 py-1.5 focus-within:border-zinc-400 focus-within:ring-2 focus-within:ring-zinc-100 transition-all">
+                            <RefreshCw size={14} className={clsx("text-zinc-400", syncing && "animate-spin")} />
+                            <input
+                                type="text"
+                                placeholder="SYNC ID #"
+                                value={manualTicketId}
+                                onChange={(e) => setManualTicketId(e.target.value.replace(/\D/g, ''))}
+                                onKeyDown={(e) => e.key === 'Enter' && handleManualTicketSync()}
+                                className="bg-transparent border-none outline-none text-[10px] font-bold uppercase w-20 placeholder:text-zinc-300"
+                            />
+                            <button
+                                onClick={handleManualTicketSync}
+                                disabled={syncing || !manualTicketId}
+                                className="text-[10px] font-black text-blue-600 hover:text-blue-700 disabled:opacity-30 uppercase tracking-tighter"
+                            >
+                                IR
+                            </button>
+                        </div>
 
                         {/* Botón de Deep Sync */}
                         <button
                             onClick={handleDeepSync}
                             disabled={syncing}
                             className="flex items-center gap-2 px-4 py-2 bg-white border border-zinc-200 hover:bg-zinc-50 hover:border-zinc-300 text-zinc-700 rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
-                            title="Buscar tickets de hasta 60 días de antigüedad"
+                            title="Buscar tickets de hasta 30 días de antigüedad"
                         >
                             <Layers size={14} />
                             <span className="text-[10px] font-bold uppercase tracking-wide">Deep Sync</span>
@@ -499,6 +581,13 @@ export function OperationsMyTasks() {
                                                             <span className="text-zinc-500 font-bold uppercase tracking-tight">IP:</span>
                                                             <code className="bg-zinc-200/50 text-zinc-800 px-1.5 py-0.5 rounded font-mono font-bold">{proc?.metadata?.ip || '0.0.0.0'}</code>
                                                         </div>
+                                                        <div className="flex items-center gap-2 text-[10px]">
+                                                            <Activity size={12} className={clsx("shrink-0", (proc?.metadata?.potencia || proc?.metadata?.signal) ? "text-emerald-500" : "text-zinc-300")} />
+                                                            <span className="text-zinc-500 font-bold uppercase tracking-tight">Potencia:</span>
+                                                            <span className={clsx("font-black", (proc?.metadata?.potencia || proc?.metadata?.signal) ? "text-emerald-700" : "text-zinc-400 italic")}>
+                                                                {proc?.metadata?.potencia || proc?.metadata?.signal || 'Pendiente'} { (proc?.metadata?.potencia || proc?.metadata?.signal) ? 'dBm' : ''}
+                                                            </span>
+                                                        </div>
                                                     </div>
                                                 </div>
                                             )}
@@ -512,6 +601,29 @@ export function OperationsMyTasks() {
                                                 <span className="text-[9px] font-bold px-2 py-1 rounded-md uppercase bg-zinc-100 text-zinc-600 border border-zinc-200 tracking-wide">
                                                     {wi.workflow_activities?.name || 'SOPORTE'}
                                                 </span>
+
+                                                {/* Badge de Atraso */}
+                                                {(() => {
+                                                    const dt = new Date(proc?.metadata?.fecha_creacion || wi.created_at);
+                                                    const today = new Date();
+                                                    today.setHours(0,0,0,0);
+                                                    if (dt < today) {
+                                                        return (
+                                                            <span className="text-[9px] font-black px-2 py-1 rounded-md uppercase bg-red-100 text-red-700 border border-red-200 animate-pulse">
+                                                                ATRASADO
+                                                            </span>
+                                                        );
+                                                    }
+                                                    return null;
+                                                })()}
+
+                                                {/* Badge de Potencia Rápido */}
+                                                {(proc?.metadata?.potencia || proc?.metadata?.signal) && (
+                                                    <span className="text-[9px] font-black px-2 py-1 rounded-md uppercase bg-emerald-50 text-emerald-700 border border-emerald-100 flex items-center gap-1">
+                                                        <Activity size={10} strokeWidth={3} />
+                                                        {proc?.metadata?.potencia || proc?.metadata?.signal}
+                                                    </span>
+                                                )}
 
                                                 {/* Badge de Prioridad */}
                                                 <span className={clsx(
@@ -682,6 +794,52 @@ export function OperationsMyTasks() {
                                         selectedMaterials={selectedMaterials}
                                         onChange={setSelectedMaterials}
                                     />
+
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div className="space-y-2">
+                                            <label className="text-[11px] font-black text-zinc-800 uppercase flex items-center gap-2 tracking-widest">
+                                                <RefreshCw size={14} className="text-zinc-400" />
+                                                Estado Final
+                                            </label>
+                                            <div className="flex bg-zinc-100 p-1 rounded-xl gap-1 w-full">
+                                                <button
+                                                    onClick={() => setFinalStatus(3)}
+                                                    className={clsx(
+                                                        "flex-1 py-1 rounded-lg text-[8px] font-black uppercase tracking-wider transition-all",
+                                                        finalStatus === 3
+                                                            ? "bg-blue-600 text-white shadow-md shadow-blue-500/20"
+                                                            : "text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50"
+                                                    )}
+                                                >
+                                                    Resuelto
+                                                </button>
+                                                <button
+                                                    onClick={() => setFinalStatus(4)}
+                                                    className={clsx(
+                                                        "flex-1 py-1 rounded-lg text-[8px] font-black uppercase tracking-wider transition-all",
+                                                        finalStatus === 4
+                                                            ? "bg-emerald-600 text-white shadow-md shadow-emerald-500/20"
+                                                            : "text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50"
+                                                    )}
+                                                >
+                                                    Cerrado
+                                                </button>
+                                            </div>
+                                        </div>
+                                        <div className="space-y-2">
+                                            <label className="text-[11px] font-black text-zinc-800 uppercase flex items-center gap-2 tracking-widest">
+                                                <Play size={14} className="text-zinc-400 rotate-90" />
+                                                Potencia (dBm)
+                                            </label>
+                                            <input
+                                                type="text"
+                                                placeholder="-22.5"
+                                                className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-4 py-2 text-xs font-bold outline-none focus:bg-white focus:border-zinc-900 transition-all text-zinc-700"
+                                                value={signal}
+                                                onChange={(e) => setSignal(e.target.value)}
+                                            />
+                                        </div>
+                                    </div>
                                 </div>
                             )}
 
@@ -690,33 +848,6 @@ export function OperationsMyTasks() {
                                     <MessageSquare size={14} className="text-zinc-400" />
                                     {actionType === 'complete' ? 'Reporte Técnico' : 'Motivo del escalamiento'}
                                 </label>
-
-                                {actionType === 'complete' && (
-                                    <div className="flex bg-zinc-100 p-1 rounded-xl gap-1 w-fit">
-                                        <button
-                                            onClick={() => setFinalStatus(3)}
-                                            className={clsx(
-                                                "px-4 py-1 rounded-lg text-[8px] font-black uppercase tracking-wider transition-all",
-                                                finalStatus === 3
-                                                    ? "bg-blue-600 text-white shadow-md shadow-blue-500/20"
-                                                    : "text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50"
-                                            )}
-                                        >
-                                            Resuelto
-                                        </button>
-                                        <button
-                                            onClick={() => setFinalStatus(4)}
-                                            className={clsx(
-                                                "px-4 py-1 rounded-lg text-[8px] font-black uppercase tracking-wider transition-all",
-                                                finalStatus === 4
-                                                    ? "bg-emerald-600 text-white shadow-md shadow-emerald-500/20"
-                                                    : "text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50"
-                                            )}
-                                        >
-                                            Cerrado
-                                        </button>
-                                    </div>
-                                )}
                                 <textarea
                                     className="w-full h-32 bg-zinc-50 border border-zinc-200 rounded-2xl p-4 text-xs font-medium outline-none focus:bg-white focus:border-zinc-900 focus:ring-4 focus:ring-zinc-100 transition-all resize-none placeholder:text-zinc-300 text-zinc-700 leading-relaxed"
                                     placeholder={actionType === 'complete' ? 'Detalla la solución técnica aplicada...' : 'Explica el motivo del escalamiento...'}
@@ -889,7 +1020,8 @@ export function OperationsMyTasks() {
 
                                                 success = await WorkflowService.completeAndSyncWorkItem(selectedTask.id, comment, {
                                                     files: processedFiles,
-                                                    statusId: finalStatus
+                                                    statusId: finalStatus,
+                                                    signal: signal // Envío de potencia
                                                 });
 
                                                 if (success) {
@@ -911,7 +1043,8 @@ export function OperationsMyTasks() {
                                                         resolution: comment,
                                                         files: evidenceFiles,
                                                         materials: materialList,
-                                                        statusId: finalStatus
+                                                        statusId: finalStatus,
+                                                        signal: signal
                                                     },
                                                     timestamp: Date.now(),
                                                     attempts: 0
@@ -958,8 +1091,8 @@ export function OperationsMyTasks() {
                                         if (success) {
                                             setSelectedTask(null);
                                             setComment('');
-                                            setEvidenceFiles([]);
                                             setSelectedMaterials({});
+                                            setSignal('');
                                             await loadMyTasks();
                                         }
                                     } finally {

@@ -1,25 +1,27 @@
 import { useState, useEffect } from 'react';
 import { Activity, XCircle, AlertTriangle, Loader2, Wifi, ShieldCheck, ArrowUp } from 'lucide-react';
 import { WisphubService } from '../../lib/wisphub';
-import { SmartOLTService } from '../../lib/smartolt';
+import { SmartOLTService, type SmartOLTOnuStatus } from '../../lib/smartolt';
 import clsx from 'clsx';
 
 interface SmartOltWidgetProps {
     cedula?: string;
     idServicio?: number | null;
+    nombre?: string;
 }
 
-export function SmartOltWidget({ cedula, idServicio }: SmartOltWidgetProps) {
-    const [loading, setLoading] = useState(false);
+export function SmartOltWidget({ cedula, idServicio, nombre }: SmartOltWidgetProps) {
+    const [loading, setLoading] = useState(true);
     const [signalRx, setSignalRx] = useState<number | null>(null);
     const [signalTx, setSignalTx] = useState<number | null>(null);
-    const [status, setStatus] = useState<string | null>(null);
+    const [status, setStatus] = useState<SmartOLTOnuStatus | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [snOnu, setSnOnu] = useState<string | null>(null);
 
     useEffect(() => {
-        if (!cedula && !idServicio) {
+        if (!cedula && !idServicio && !nombre) {
             setError('Información de red no disponible.');
+            setLoading(false);
             return;
         }
 
@@ -30,11 +32,12 @@ export function SmartOltWidget({ cedula, idServicio }: SmartOltWidgetProps) {
             setError(null);
             try {
                 // 1. Obtener sn_onu desde WispHub
-                const clientDetails = await WisphubService.getClientForSmartOlt(cedula, idServicio || undefined);
+                const clientDetails = await WisphubService.getClientForSmartOlt(cedula, idServicio || undefined, nombre);
+                
                 if (!isMounted) return;
 
                 if (!clientDetails) {
-                    setError('Cliente no encontrado en WispHub.');
+                    setError(`Cliente no encontrado en WispHub (Servicio: ${idServicio || 'N/A'}, Cédula: ${cedula || 'N/A'}).`);
                     setLoading(false);
                     return;
                 }
@@ -105,14 +108,14 @@ export function SmartOltWidget({ cedula, idServicio }: SmartOltWidgetProps) {
         return (
             <div className={clsx(
                 "flex items-center gap-1.5 px-3 py-1 rounded-full border border-opacity-50 shadow-[0_0_15px_rgba(0,0,0,0.2)]",
-                status === 'online' ? "border-[#2de370] text-[#2de370] shadow-[#2de370]/20" :
-                status === 'los' ? "border-rose-500 text-rose-500 shadow-rose-500/20" :
-                status === 'power_failure' ? "border-amber-500 text-amber-500 shadow-amber-500/20" :
+                status.status === 'online' ? "border-[#2de370] text-[#2de370] shadow-[#2de370]/20" :
+                status.status === 'los' ? "border-rose-500 text-rose-500 shadow-rose-500/20" :
+                status.status === 'power_failure' ? "border-amber-500 text-amber-500 shadow-amber-500/20" :
                 "border-slate-500 text-slate-400"
             )}>
-                <Activity size={14} className={clsx("animate-pulse", status !== 'online' && "hidden")} />
+                <Activity size={14} className={clsx("animate-pulse", status.status !== 'online' && "hidden")} />
                 <span className="text-xs font-bold tracking-wide uppercase">
-                    {status === 'power_failure' ? 'SIN ENERGÍA' : status === 'los' ? 'CABLE ROTO' : status}
+                    {status.status === 'power_failure' ? 'SIN ENERGÍA' : status.status === 'los' ? 'CABLE ROTO' : status.status}
                 </span>
             </div>
         );
@@ -173,9 +176,23 @@ export function SmartOltWidget({ cedula, idServicio }: SmartOltWidgetProps) {
                                             </span>
                                             <span className="text-2xl font-bold text-slate-200">dBm</span>
                                         </div>
-                                        <div className="mt-2 text-sm font-semibold text-slate-300 flex items-center gap-1">
-                                            <span className="text-white font-bold">RX</span> (Recepción)
+                                        <div className="mt-2 text-[10px] font-black text-slate-400 flex items-center gap-2 uppercase tracking-tighter">
+                                            <div className="flex items-center gap-1">
+                                                <span className="text-white font-black bg-blue-500/20 px-1 rounded">RX</span>
+                                                <span>(Recepción)</span>
+                                            </div>
+                                            {status?.status === 'offline' && (
+                                                <div className="flex items-center gap-1 text-amber-400 bg-amber-400/10 px-1.5 py-0.5 rounded-sm border border-amber-400/20">
+                                                    <AlertTriangle size={10} />
+                                                    <span>HISTÓRICA</span>
+                                                </div>
+                                            )}
                                         </div>
+                                        {status?.last_online_change && status.status === 'offline' && (
+                                            <div className="text-[9px] font-bold text-slate-500 mt-1">
+                                                U.V: {status.last_online_change}
+                                            </div>
+                                        )}
                                     </div>
 
                                     {/* Divisor Vertical */}

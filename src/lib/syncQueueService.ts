@@ -14,6 +14,7 @@ export interface PendingSync {
         targetTechnicianId?: string;
         priority?: number;
         statusId?: number;
+        signal?: string;
     };
     timestamp: number;
     attempts: number;
@@ -113,7 +114,8 @@ class SyncQueueService {
                         sync.data.resolution,
                         {
                             files: sync.data.files,
-                            statusId: sync.data.statusId
+                            statusId: sync.data.statusId,
+                            signal: sync.data.signal
                         }
                     );
                 } else if (sync.type === 'ESCALATE') {

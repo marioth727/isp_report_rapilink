@@ -10,7 +10,8 @@ import {
     Package,
     History,
     Download,
-    Mail
+    Mail,
+    AlertTriangle
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { SignaturePad } from '../components/ui/SignaturePad';
@@ -23,6 +24,7 @@ export default function InventorySlips() {
     const [technicians, setTechnicians] = useState<any[]>([]);
     const [selectedTech, setSelectedTech] = useState<any>(null);
     const [loading, setLoading] = useState(false);
+    const [openTicketsWithMaterial, setOpenTicketsWithMaterial] = useState<any[]>([]); // Tickets que tienen material pero no están cerrados
 
     const [itemsToProcess, setItemsToProcess] = useState<any[]>([]); // Items to deliver or settle
     const [techStock, setTechStock] = useState<any[]>([]); // Items currently assigned to tech
@@ -86,13 +88,55 @@ export default function InventorySlips() {
         setLoading(true);
 
         if (mode === 'morning') {
+            const today = new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD local
+
+            // 1. Fetch Today's Morning Slips to filter out already signed items
+            const { data: todaysMorningSlips } = await supabase
+                .from('inventory_delivery_slips')
+                .select('items_snapshot')
+                .eq('technician_id', tech.id)
+                .eq('slip_type', 'morning_delivery')
+                .gte('created_at', today);
+
+            const alreadyInSlipQty = new Map<string, number>();
+            if (todaysMorningSlips) {
+                todaysMorningSlips.forEach(slip => {
+                    if (Array.isArray(slip.items_snapshot)) {
+                        slip.items_snapshot.forEach((item: any) => {
+                            if (item.id) {
+                                const currentQty = alreadyInSlipQty.get(item.id) || 0;
+                                alreadyInSlipQty.set(item.id, currentQty + (item.quantity || 1));
+                            }
+                        });
+                    }
+                });
+            }
+
+            // 2. Fetch current stock assigned to tech
             const { data: assets } = await supabase
                 .from('inventory_assets')
                 .select('*, inventory_items(name, is_serialized)')
                 .eq('current_holder_id', tech.id)
                 .eq('status', 'assigned');
 
-            setItemsToProcess(assets || []);
+            // 3. Filter or adjust quantities for items already processed today
+            const pendingAssets = (assets || []).map(asset => {
+                const signedQty = alreadyInSlipQty.get(asset.id) || 0;
+                const assetQty = asset.quantity || 1;
+                
+                if (signedQty > 0) {
+                    if (assetQty > signedQty) {
+                        // Return only the difference (new additions)
+                        return { ...asset, quantity: assetQty - signedQty };
+                    } else {
+                        // Fully signed already
+                        return null; 
+                    }
+                }
+                return asset;
+            }).filter(Boolean);
+
+            setItemsToProcess(pendingAssets);
         } else {
             // [FIX] Usar fecha local del cliente, no UTC.
             const today = new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD local
@@ -125,8 +169,38 @@ export default function InventorySlips() {
                 });
             }
 
-            // Filter out installations that are already in a settlement
-            const pendingInstallations = (installations || []).filter(inst => !settledIds.has(inst.id));
+            const filteredInstallations = (installations || []).filter(inst => !settledIds.has(inst.asset_id));
+            setItemsToProcess(filteredInstallations);
+
+            // 1.6 DETECCIÓN DE TICKETS FANTASMA (Abiertos con Material)
+            // Buscamos tickets en WispHub vinculados a este técnico que no estén cerrados (status 4)
+            const { data: activeWorkItems } = await supabase
+                .from('workflow_workitems')
+                .select('*, workflow_activities(process_id, workflow_processes(reference_id, metadata))')
+                .eq('participant_id', tech.id)
+                .eq('status', 'PE');
+
+            const ghostCandidates = [];
+            if (activeWorkItems) {
+                for (const wi of activeWorkItems) {
+                    const ticketId = wi.workflow_activities?.workflow_processes?.reference_id;
+                    if (ticketId) {
+                        // Vemos si este ticket tiene algún movimiento de CONSUMO hoy
+                        const hasMaterial = filteredInstallations.some(inst => 
+                            inst.notes?.includes(`#${ticketId}`) || 
+                            inst.notes?.includes(ticketId)
+                        );
+                        if (hasMaterial) {
+                            ghostCandidates.push({
+                                id: ticketId,
+                                client: wi.workflow_activities?.workflow_processes?.metadata?.nombre_cliente || 'Cliente Desconocido',
+                                items: filteredInstallations.filter(inst => inst.notes?.includes(ticketId))
+                            });
+                        }
+                    }
+                }
+            }
+            setOpenTicketsWithMaterial(ghostCandidates);
 
             // 2. Fetch Current Remaining Stock (to show the "Cruce")
             const { data: currentStock } = await supabase
@@ -135,7 +209,7 @@ export default function InventorySlips() {
                 .eq('current_holder_id', tech.id)
                 .eq('status', 'assigned');
 
-            setItemsToProcess(pendingInstallations);
+            setItemsToProcess(filteredInstallations);
             // @ts-ignore - we'll use this in the UI logic
             setTechStock(currentStock || []);
         }
@@ -644,6 +718,29 @@ export default function InventorySlips() {
                                 <h3 className="text-2xl font-black uppercase tracking-tight">{mode === 'morning' ? 'Material a Cargo' : 'Resumen Instalaciones'}</h3>
                                 <p className="text-muted-foreground font-medium">Técnico: {selectedTech.full_name}</p>
                             </div>
+
+                            {/* ALERTA DE TICKETS ABIERTOS (ANTI-FANTASMA) */}
+                            {mode === 'evening' && openTicketsWithMaterial.length > 0 && (
+                                <div className="mt-4 p-4 bg-orange-50 border-2 border-orange-200 rounded-3xl animate-pulse">
+                                    <div className="flex items-start gap-3">
+                                        <AlertTriangle className="text-orange-600 w-5 h-5 shrink-0 mt-0.5" />
+                                        <div>
+                                            <p className="text-[10px] font-black uppercase text-orange-800 tracking-tight">Atención: Material en Vivienda Detectado</p>
+                                            <p className="text-[10px] text-orange-700 font-bold leading-tight mt-1">
+                                                Hay {openTicketsWithMaterial.length} ticket(s) con material instalado que siguen abiertos. 
+                                                Al liquidar, estos quedarán como "Reserva en Vivienda" para mañana.
+                                            </p>
+                                            <div className="mt-2 flex flex-wrap gap-1">
+                                                {openTicketsWithMaterial.map(tk => (
+                                                    <span key={tk.id} className="text-[8px] bg-white/50 px-2 py-0.5 rounded border border-orange-200 font-black text-orange-700">
+                                                        TK-{tk.id}
+                                                    </span>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
                             <div className="px-4 py-2 bg-muted rounded-xl text-xs font-black uppercase hidden sm:block">
                                 {new Date().toLocaleDateString()}
                             </div>

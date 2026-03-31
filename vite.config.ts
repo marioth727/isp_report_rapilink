@@ -15,9 +15,14 @@ export default defineConfig(({ mode }) => {
       },
       proxy: {
         '/api/wisphub': {
+          // ⚠️ TRAMPA CONOCIDA:
+          // - Sitio web de WispHub: www.wisphub.io (nginx, 403 en /api/)
+          // - API REST de WispHub: api.wisphub.io (Django, acepta Api-Key)
+          // - Documentación: wisphub.net
+          // NUNCA usar www. para API calls ni .net para producción
           target: 'https://api.wisphub.io',
           changeOrigin: true,
-          secure: false, // OBLIGATORIO: El certificado de api.wisphub.io puede ser visto como expirado por Node
+          secure: false, // SSL bypass necesario para api.wisphub.io
           rewrite: (path) => path.replace(/^\/api\/wisphub/, '/api'),
           configure: (proxy, _options) => {
             proxy.on('proxyReq', (proxyReq, _req, _res) => {

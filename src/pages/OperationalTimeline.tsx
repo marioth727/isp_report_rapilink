@@ -22,6 +22,7 @@ interface TimelineTicket {
     prioridad: string;
     tecnico_actual: string;
     asunto: string;
+    id_estado?: number;
 
     // Timestamps
     fecha_creacion: string;
@@ -278,7 +279,8 @@ export function OperationalTimeline({
                 duracion_trabajo,
                 runningTime,
                 isStuck,
-                estado: calculateTicketState(t)
+                estado: calculateTicketState(t),
+                id_estado: t.id_estado
             });
             processedTicketIds.add(String(t.id));
         };
@@ -439,6 +441,11 @@ function TicketRow({ ticket }: { ticket: TimelineTicket }) {
                 <div>
                     <div className="flex items-center gap-2">
                         <h4 className="text-[11px] font-[1000] text-slate-900 group-hover:text-primary transition-colors uppercase tracking-tight">#{ticket.id} - {ticket.nombre_cliente}</h4>
+                        {ticket.id_estado === 5 && (
+                            <div className="px-1.5 py-0.5 bg-amber-500 text-white text-[8px] font-black uppercase rounded shadow-sm animate-pulse">
+                                Escalado
+                            </div>
+                        )}
                         {ticket.isStuck && (
                             <div className="flex items-center gap-1.5 px-2 py-0.5 bg-red-50 border border-red-100 rounded-full animate-pulse">
                                 <div className="w-1.5 h-1.5 bg-red-500 rounded-full" />
