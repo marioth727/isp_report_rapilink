@@ -16,8 +16,12 @@ export const SmartOLTService = {
      */
     async verifyAssetStatus(serialNumber: string): Promise<any | null> {
         try {
+            // SANITIZACIÓN CRÍTICA: Eliminar espacios copiados/pegados por error
+            const cleanSn = serialNumber ? serialNumber.toString().trim().toUpperCase() : '';
+            if (!cleanSn) return null;
+
             // Endpoint plural confirmado mediante diagnóstico
-            const response = await fetch(`/api/smartolt/onu/get_onus_details_by_sn/${serialNumber}`);
+            const response = await fetch(`/api/smartolt/onu/get_onus_details_by_sn/${cleanSn}`);
 
             if (!response.ok) {
                 if (response.status === 404) return null;
@@ -30,7 +34,7 @@ export const SmartOLTService = {
                 const onu = data.onus[0];
                 return {
                     id: onu.unique_external_id,
-                    sn: onu.sn || serialNumber,
+                    sn: onu.sn || cleanSn,
                     name: onu.name,
                     status: onu.status.toLowerCase(),
                     signal_dbm: parseFloat(onu.signal_1490) || parseFloat(onu.signal) || 0,
