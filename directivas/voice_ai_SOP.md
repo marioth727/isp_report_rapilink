@@ -3,15 +3,30 @@
 ## Objetivo
 Sistema de llamadas automatizadas con agente de voz "Sofía" para campañas de upgrade de planes de internet. El motor de IA es Retell AI conectado a Issabel PBX, orquestado por n8n, con dashboard de seguimiento en Antigravity.
 
-## Arquitectura Final
+## Arquitectura Actual (Gemini Live + LiveKit)
+```
+WISPHub API → Antigravity UI → n8n webhook → caller.py → LiveKit SIP → Issabel 4 → Cliente
+                                                               ↓
+                               n8n callbacks ← agent.py (Sofía / Gemini 3.1 Flash Live)
+                                   ↓
+                            Supabase (voice_calls)
+                                   ↓
+                           Antigravity Dashboard
+```
+
+**Scripts en:** `scripts/gemini_voice_agent/`
+- `agent.py` — Motor de IA (Sofía). Escucha el Room y maneja la conversación.
+- `caller.py` — Despachador de llamadas salientes. Creado por n8n al lanzar cada llamada.
+
+## Arquitectura Anterior (Retell AI — Referencia Histórica)
 ```
 WISPHub API → Antigravity UI → n8n webhook → Retell API → Issabel PBX → Cliente
-                                                ↓
-                              n8n callbacks ← Retell Tools
-                                  ↓
-                           Supabase (voice_calls)
-                                  ↓
-                          Antigravity Dashboard
+                                                 ↓
+                               n8n callbacks ← Retell Tools
+                                   ↓
+                            Supabase (voice_calls)
+                                   ↓
+                           Antigravity Dashboard
 ```
 
 ## Componentes Implementados
